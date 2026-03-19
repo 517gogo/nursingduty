@@ -804,12 +804,6 @@ function _variance(arr) {
 function step9_WantedRepair(sched, nurses, wanted, prevHist, totalDays, year, month, locked) {
 
   const snapSched = sched.map(r => [...r]);
-  const precNewIdxSet = new Set();
-  nurses.filter(n => n.type === NURSE_TYPE.NEW && n.preceptor).forEach(n => {
-    precNewIdxSet.add(n.idx);
-    const prec = nurses.find(p => p.name === n.preceptor);
-    if (prec) precNewIdxSet.add(prec.idx);
-  });
 
   const reflectedMap = {};
   wanted.forEach(req => {
@@ -885,8 +879,7 @@ function step9_WantedRepair(sched, nurses, wanted, prevHist, totalDays, year, mo
           for (const cand of nurses) {
             if (cand.idx === nurse.idx) continue;
             if (FIXED_AUTO_TYPES.has(cand.type) || cand.type === NURSE_TYPE.NIGHT) continue;
-            if (precNewIdxSet.has(cand.idx)) continue;
-            
+
             const candCur = sched[cand.idx][d];
             if (candCur && candCur !== DUTY.OFF) continue;
             if (locked[cand.idx][d]) continue;
@@ -1029,44 +1022,6 @@ function step9_WantedRepair(sched, nurses, wanted, prevHist, totalDays, year, mo
     tryAssignWanted(req);
   }
 
-  const newNursesWithOffWanted = nurses.filter(n =>
-    n.type === NURSE_TYPE.NEW && n.preceptor &&
-    wanted.some(req => req.nurse.idx === n.idx && isOff(req.wtype))
-  );
-
-  newNursesWithOffWanted.forEach(newNurse => {
-    const preceptor = nurses.find(p => p.name === newNurse.preceptor);
-    if (!preceptor) return;
-
-    const offWanteds = wanted.filter(req =>
-      req.nurse.idx === newNurse.idx && isOff(req.wtype)
-    );
-
-    offWanteds.forEach(req => {
-      const d   = req.day - 1;
-      if (locked[newNurse.idx][d]) return;
-      
-      const cur = sched[newNurse.idx][d] || '';
-
-      if (isOff(cur) || isRecovery(cur)) return;
-      const precDuty = sched[preceptor.idx][d] || '';
-      if (!isWork(precDuty)) return;
-      if (!canAssignOff(sched, newNurse.idx, d, DUTY.OFF, prevHist, totalDays)) return;
-      
-      const offCnt = sched[newNurse.idx].filter(v => isOff(v) && !isRecovery(v)).length;
-      if (offCnt >= RULES.OFF_MAX) return;
-
-      const oldVal = cur;
-      const baseV = countViolations(sched, nurses, prevHist, totalDays);
-      
-      sched[newNurse.idx][d] = DUTY.OFF;
-      if (countViolations(sched, nurses, prevHist, totalDays) <= baseV) {
-        log(`[Step9-NewOff] ${newNurse.name} ${d+1}일 ${oldVal}→오프 (프리셉터 ${preceptor.name} 근무중)`);
-      } else {
-        sched[newNurse.idx][d] = oldVal;
-      }
-    });
-  });
 }
 
 function runBestOf(ss, yyyymm) {
@@ -1278,64 +1233,18 @@ function step2_AutoRoles(sched, nurses, totalDays, year, month, holidays) {
 }
 
 
-function _pullPreceptorToMatch(nurse, d, assignedDuty, sched, nurses, newToPreceptor, prevHist, totalDays, year, month) {
-  const prec = newToPreceptor[nurse.idx];
-  if (!prec) return;
-  if (isAssigned(sched[prec.idx][d])) return;
-
-  if (isWork(assignedDuty)) {
-    const cnt = countGeneralStaff(sched, nurses, d);
-    if ((cnt[assignedDuty] || 0) >= RULES.MAX_STAFF[assignedDuty]) return;
-    const ok = canAssignWork(sched, prec.idx, d, assignedDuty, prevHist, totalDays, year, month);
-    if (ok) {
-      sched[prec.idx][d] = assignedDuty;
-      log(`[Prec-Pull] ${nurse.name}(신규) → ${prec.name}(프리셉터) ${d+1}일 ${assignedDuty} 동기화`);
-    }
-  } else if (isOff(assignedDuty) || isRecovery(assignedDuty)) {
-    if (canAssignOff(sched, prec.idx, d, DUTY.OFF, prevHist, totalDays)) {
-      sched[prec.idx][d] = assignedDuty;
-      log(`[Prec-Pull] ${nurse.name}(신규) → ${prec.name}(프리셉터) ${d+1}일 ${assignedDuty} 동기화`);
-    }
-  }
-}
 
 function step3_Wanted(sched, nurses, wantedReqs, totalDays, prevHist, year, month) {
   const processed = new Set();
   const tieQueue  = [];
 
-  const preceptorNames = new Set(
-    nurses.filter(n => n.type === NURSE_TYPE.NEW && n.preceptor).map(n => n.preceptor)
-  );
-  const newNurseNames = new Set(
-    nurses.filter(n => n.type === NURSE_TYPE.NEW && n.preceptor).map(n => n.name)
-  );
-
-  const groupA = [], groupB = [];
-  wantedReqs.forEach((req, i) => {
-    if (preceptorNames.has(req.nurse.name) || newNurseNames.has(req.nurse.name)) groupA.push({ req, i });
-    else groupB.push({ req, i });
-  });
-
-  groupA.sort((a, b) => {
-    if (a.req.day !== b.req.day) return a.req.day - b.req.day;
-    const aIsNew = newNurseNames.has(a.req.nurse.name) ? 1 : 0;
-    const bIsNew = newNurseNames.has(b.req.nurse.name) ? 1 : 0;
-    return aIsNew - bIsNew;
-  });
-
-  const orderedReqs = [...groupA, ...groupB];
+  const orderedReqs = wantedReqs.map((req, i) => ({ req, i }));
 
   const groupMap = new Map();
   wantedReqs.forEach((req, i) => {
     const key = `${req.day}_${req.priority}`;
     if (!groupMap.has(key)) groupMap.set(key, []);
     groupMap.get(key).push({ req, i });
-  });
-
-  const newToPreceptor = {};
-  nurses.filter(n => n.type === NURSE_TYPE.NEW && n.preceptor).forEach(n => {
-    const prec = nurses.find(p => p.name === n.preceptor);
-    if (prec) newToPreceptor[n.idx] = prec;
   });
 
   function processReq(req, i) {
@@ -1345,28 +1254,6 @@ function step3_Wanted(sched, nurses, wantedReqs, totalDays, prevHist, year, mont
 
     if (isAssigned(sched[nurse.idx][d])) { processed.add(i); return; }
     if (wtype === DUTY.MENSES && sched[nurse.idx][d] === DUTY.N) { processed.add(i); return; }
-
-    const prec = newToPreceptor[nurse.idx];
-    if (prec) {
-      const precDuty = sched[prec.idx][d];
-      if (isAssigned(precDuty)) {
-        const effective = precDuty;
-        if (wtype !== effective && req.fallbackWtype !== effective) {
-          if (isWork(effective)) {
-            const cnt = countGeneralStaff(sched, nurses, d);
-            if ((cnt[effective] || 0) < RULES.MAX_STAFF[effective]) {
-              const ok = canAssignWork(sched, nurse.idx, d, effective, prevHist, totalDays, year, month);
-              if (ok) sched[nurse.idx][d] = effective;
-            }
-          } else if (isOff(effective) || isRecovery(effective)) {
-            if (canAssignOff(sched, nurse.idx, d, DUTY.OFF, prevHist, totalDays))
-              sched[nurse.idx][d] = effective;
-          }
-          processed.add(i);
-          return;
-        }
-      }
-    }
 
     const transOk =
       checkTransition(sched, nurse.idx, d, wtype, prevHist, totalDays) &&
@@ -1405,7 +1292,6 @@ function step3_Wanted(sched, nurses, wantedReqs, totalDays, prevHist, year, mont
     if (candidates.length <= 1) {
       sched[nurse.idx][d] = wtype;
       processed.add(i);
-      _pullPreceptorToMatch(nurse, d, wtype, sched, nurses, newToPreceptor, prevHist, totalDays, year, month);
     } else {
       const winner = resolveConflict(candidates.map(c => c.req));
       if (winner === null) {
@@ -1413,7 +1299,6 @@ function step3_Wanted(sched, nurses, wantedReqs, totalDays, prevHist, year, mont
       } else {
         sched[winner.nurse.idx][winner.day - 1] = winner.wtype;
         candidates.forEach(({ i: idx }) => processed.add(idx));
-        _pullPreceptorToMatch(winner.nurse, winner.day - 1, winner.wtype, sched, nurses, newToPreceptor, prevHist, totalDays, year, month);
       }
     }
   }
@@ -1493,52 +1378,12 @@ function step5_NightDedicatedOff(sched, nurses, totalDays) {
 }
 
 
-function _syncNewNursesInStep6(prec, d, precDuty, sched, nurses, counts,
-                                precToNewMap, prevHist, totalDays, year, month) {
-  const newList = precToNewMap[prec.idx];
-  if (!newList) return;
-
-  for (const newNurse of newList) {
-    if (isAssigned(sched[newNurse.idx][d])) continue;
-
-    if (isWork(precDuty)) {
-      const maxReached = (counts[precDuty] || 0) >= RULES.MAX_STAFF[precDuty];
-      const ok = !maxReached &&
-        canAssignWork(sched, newNurse.idx, d, precDuty, prevHist, totalDays, year, month);
-      if (ok) {
-        sched[newNurse.idx][d] = precDuty;
-        counts[precDuty] = (counts[precDuty] || 0) + 1;
-        log(`[Step6-Sync] ${prec.name} → ${newNurse.name} ${d+1}일 ${precDuty}`);
-      } else {
-        if (canAssignOff(sched, newNurse.idx, d, DUTY.OFF, prevHist, totalDays)) {
-          sched[newNurse.idx][d] = DUTY.OFF;
-          log(`[Step6-Sync-FB] ${newNurse.name} ${d+1}일 오프(근무 배정 불가 fallback)`);
-        }
-      }
-    } else if (isOff(precDuty) || isRecovery(precDuty)) {
-      if (canAssignOff(sched, newNurse.idx, d, DUTY.OFF, prevHist, totalDays)) {
-        sched[newNurse.idx][d] = precDuty; 
-        log(`[Step6-Sync] ${prec.name} → ${newNurse.name} ${d+1}일 ${precDuty}`);
-      }
-    }
-  }
-}
 
 function step6_GeneralDuty(sched, nurses, totalDays, prevHist, year, month, holidays) {
   const targetNurses = nurses.filter(n =>
     n.type === NURSE_TYPE.GENERAL || n.type === NURSE_TYPE.NEW
   );
 
-  const precToNewMap = {};
-  nurses.filter(n => n.type === NURSE_TYPE.NEW && n.preceptor).forEach(n => {
-    const prec = nurses.find(p => p.name === n.preceptor);
-    if (!prec) return;
-    if (!precToNewMap[prec.idx]) precToNewMap[prec.idx] = [];
-    precToNewMap[prec.idx].push(n);
-  });
-  const newIdxSet = new Set(
-    nurses.filter(n => n.type === NURSE_TYPE.NEW && n.preceptor).map(n => n.idx)
-  );
 
   function getNurseCounts(nurse) {
     let d_ = 0, e_ = 0, n_ = 0, off_ = 0, special_ = 0;
@@ -1593,17 +1438,13 @@ function step6_GeneralDuty(sched, nurses, totalDays, prevHist, year, month, holi
         const tc = countTeamStaff(sched, nurses, team, d);
         if (tc[duty] > 0) continue; // 이미 커버됨
 
-        const teamNurses = shuffled.filter(n =>
-          n.team === team && !newIdxSet.has(n.idx)
-        );
+        const teamNurses = shuffled.filter(n => n.team === team);
         for (const nurse of teamNurses) {
           if (isAssigned(sched[nurse.idx][d])) continue;
           if ((counts[duty] || 0) >= RULES.MAX_STAFF[duty]) break;
           if (!canAssignWork(sched, nurse.idx, d, duty, prevHist, totalDays, year, month)) continue;
           sched[nurse.idx][d] = duty;
           counts[duty]++;
-          _syncNewNursesInStep6(nurse, d, duty, sched, nurses, counts,
-                                precToNewMap, prevHist, totalDays, year, month);
           break;
         }
       }
@@ -1611,7 +1452,6 @@ function step6_GeneralDuty(sched, nurses, totalDays, prevHist, year, month, holi
 
     for (const nurse of shuffled) {
       if (isAssigned(sched[nurse.idx][d])) continue;
-      if (newIdxSet.has(nurse.idx)) continue;
 
       const nc      = getNurseCounts(nurse);
       const targets = getTargets(nurse);
@@ -1636,14 +1476,10 @@ function step6_GeneralDuty(sched, nurses, totalDays, prevHist, year, month, holi
 
       sched[nurse.idx][d] = options[0];
       counts[options[0]]++;
-
-      _syncNewNursesInStep6(nurse, d, options[0], sched, nurses, counts,
-                            precToNewMap, prevHist, totalDays, year, month);
     }
 
     for (const nurse of shuffled) {
       if (isAssigned(sched[nurse.idx][d])) continue;
-      if (newIdxSet.has(nurse.idx)) continue;
 
       const nc      = getNurseCounts(nurse);
       const targets = getTargets(nurse);
@@ -1687,22 +1523,6 @@ function step6_GeneralDuty(sched, nurses, totalDays, prevHist, year, month, holi
       const chosen = workOptions[0];
       sched[nurse.idx][d] = chosen;
       if (counts[chosen] !== undefined) counts[chosen]++;
-
-      _syncNewNursesInStep6(nurse, d, chosen, sched, nurses, counts,
-                            precToNewMap, prevHist, totalDays, year, month);
-    }
-
-    for (const nurse of shuffled) {
-      if (!newIdxSet.has(nurse.idx)) continue;
-      if (isAssigned(sched[nurse.idx][d])) continue;
-      const prec = nurses.find(p => precToNewMap[p.idx] && precToNewMap[p.idx].some(n => n.idx === nurse.idx));
-      if (!prec || !isAssigned(sched[prec.idx][d])) {
-        if (canAssignOff(sched, nurse.idx, d, DUTY.OFF, prevHist, totalDays))
-          sched[nurse.idx][d] = DUTY.OFF;
-      } else {
-        _syncNewNursesInStep6(prec, d, sched[prec.idx][d], sched, nurses, counts,
-                              precToNewMap, prevHist, totalDays, year, month);
-      }
     }
   }
 }
@@ -1741,84 +1561,7 @@ function enforceOffMax(sched, nurses, totalDays, prevHist, year, month, locked) 
 }
 
 function step7_PreceptorMatch(sched, nurses, totalDays, prevHist, year, month, holidays, locked) {
-  const newNurses = nurses.filter(n => n.type === NURSE_TYPE.NEW && n.preceptor);
-
-  newNurses.forEach(newNurse => {
-    const preceptor = nurses.find(n => n.name === newNurse.preceptor);
-    if (!preceptor) return;
-
-    for (let d = 0; d < totalDays; d++) {
-      const newCur   = sched[newNurse.idx][d];
-      const precDuty = sched[preceptor.idx][d];
-      if (!isAssigned(precDuty)) continue;
-
-      const newIsOff  = isOff(newCur) || isRecovery(newCur);
-      const precIsOff = isOff(precDuty) || isRecovery(precDuty);
-      if (newCur === precDuty) continue;
-      if (newIsOff && precIsOff) continue;
-
-      const oldVal = sched[newNurse.idx][d];
-
-      if (isAssigned(oldVal)) {
-        // [핵심 보호] 신규 간호사라도 사용자가 직접 D, E, 오프 등을 고정해 뒀다면 변경 불가!
-        if (locked[newNurse.idx][d]) continue;
-
-        if (isOff(oldVal) && oldVal !== DUTY.OFF) continue;
-        if (isNight(oldVal) || isRecovery(oldVal))  continue;
-        if (oldVal === DUTY.EDU || oldVal === DUTY.EDU_R) continue;
-      }
-
-      if (precIsOff) {
-        if (canAssignOff(sched, newNurse.idx, d, DUTY.OFF, prevHist, totalDays)) {
-          sched[newNurse.idx][d] = precDuty; 
-          log(`[Step7] 불일치 교정: ${newNurse.name} ${d+1}일 ${oldVal}→${precDuty} (${preceptor.name} 쉬는날)`);
-        }
-        continue;
-      }
-
-      if (isWork(precDuty)) {
-        const counts = countGeneralStaff(sched, nurses, d);
-        if ((counts[precDuty] || 0) >= RULES.MAX_STAFF[precDuty]) {
-          if (!isAssigned(sched[newNurse.idx][d]) &&
-              canAssignOff(sched, newNurse.idx, d, DUTY.OFF, prevHist, totalDays)) {
-            sched[newNurse.idx][d] = DUTY.OFF;
-          }
-          continue;
-        }
-        const ok = canAssignWork(sched, newNurse.idx, d, precDuty, prevHist, totalDays, year, month);
-        if (ok) {
-          sched[newNurse.idx][d] = precDuty;
-          log(`[Step7] 불일치 교정: ${newNurse.name} ${d+1}일 ${oldVal}→${precDuty} (${preceptor.name} 따라감)`);
-        } else if (!isAssigned(sched[newNurse.idx][d]) &&
-                   canAssignOff(sched, newNurse.idx, d, DUTY.OFF, prevHist, totalDays)) {
-          sched[newNurse.idx][d] = DUTY.OFF;
-        }
-      }
-    }
-  });
-
-  newNurses.forEach(newNurse => {
-    for (let d = 0; d < totalDays; d++) {
-      if (!isAssigned(sched[newNurse.idx][d])) {
-        const offCount = sched[newNurse.idx].filter(v => isOff(v) && !isRecovery(v)).length;
-        if (offCount < RULES.OFF_MAX) {
-          sched[newNurse.idx][d] = DUTY.OFF;
-          log(`[Step7-Safety] ${newNurse.name} ${d+1}일 미배정 → 오프 강제`);
-        } else {
-          const prec = nurses.find(p => p.name === newNurse.preceptor);
-          const precDuty = prec ? sched[prec.idx][d] : null;
-          const fallback = (precDuty && isWork(precDuty)) ? precDuty : DUTY.D;
-          const cnt = countGeneralStaff(sched, nurses, d);
-          if ((cnt[fallback] || 0) < RULES.MAX_STAFF[fallback] &&
-              canAssignWork(sched, newNurse.idx, d, fallback, prevHist, totalDays, year, month)) {
-            sched[newNurse.idx][d] = fallback;
-          } else {
-            sched[newNurse.idx][d] = DUTY.OFF;
-          }
-        }
-      }
-    }
-  });
+  // 신규 간호사를 일반 간호사와 동일하게 배정하므로 프리셉터 동기화 처리 없음
 }
 
 
@@ -1834,13 +1577,6 @@ function step8_RepairViolations(sched, nurses, totalDays, prevHist, wanted, year
     });
   }
   const isWantedCell = (nurseIdx, d) => wantedSet.has(`${nurseIdx}_${d}`);
-
-  const precNewIdxSet = new Set();
-  nurses.filter(n => n.type === NURSE_TYPE.NEW && n.preceptor).forEach(n => {
-    precNewIdxSet.add(n.idx);
-    const prec = nurses.find(p => p.name === n.preceptor);
-    if (prec) precNewIdxSet.add(prec.idx);
-  });
 
   const repairTargets = nurses.filter(n => !FIXED_AUTO_TYPES.has(n.type));
 
@@ -1938,7 +1674,6 @@ function step8_RepairViolations(sched, nurses, totalDays, prevHist, wanted, year
       
       if (locked[nurse.idx][day]) continue; 
       
-      if (precNewIdxSet.has(nurse.idx)) continue;
       if (!canAssignWork(sched, nurse.idx, day, duty, prevHist, totalDays, year, month)) continue;
       
       const offCount = sched[nurse.idx].filter(v => isOff(v) && !isRecovery(v)).length;
@@ -1962,7 +1697,6 @@ function step8_RepairViolations(sched, nurses, totalDays, prevHist, wanted, year
       const cur = sched[nurse.idx][day];
       if (cur && cur !== DUTY.OFF) continue;
       if (locked[nurse.idx][day]) continue;
-      if (precNewIdxSet.has(nurse.idx)) continue;
       if (!canAssignWork(sched, nurse.idx, day, duty, prevHist, totalDays, year, month)) continue;
       const offCount = sched[nurse.idx].filter(v => isOff(v) && !isRecovery(v)).length;
       if (offCount >= RULES.OFF_MAX) continue;
