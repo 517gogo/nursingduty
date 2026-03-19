@@ -1,0 +1,2731 @@
+// Google Apps Script 기본 진입점
+function myFunction() {}
+
+/**
+ * ============================================================
+ * Config.gs — 전체 상수 및 설정 정의
+ * ============================================================
+ */
+
+const NURSE_TYPE = {
+  HEAD:    '수간호사',
+  P_D:     'P-D',
+  P_E:     'P-E',
+  NIGHT:   '나이트전담',
+  GENERAL: '일반',
+  NEW:     '신규',
+};
+
+const DUTY = {
+  D:      'D',
+  E:      'E',
+  N:      'N',
+  N_FULL: 'N전',
+  OFF:    '/',
+  MENSES: '생',
+  REC1:   '리1',
+  REC2:   '리2',
+  EDU:    '교육',
+  EDU_R:  '필교',
+  EDU_T:  '교연',
+  ANNUAL: '연차',
+  HEALTH: '건진',
+  SICK:   '병',
+  BLOOD:  '헌',
+  CARE:   '돌봄',
+  BIRTH:  '분만',
+  ETC:    '기타',
+  D9:     '9',   // 토요일 특수 듀티
+  D10:    '10',  // 일요일/공휴일 특수 듀티
+  HEAD_DUTY: '7r',
+  P_D_DUTY:  '7',
+  P_E_DUTY:  '13',
+};
+
+const OFF_DUTIES = new Set([
+  DUTY.OFF, DUTY.MENSES, DUTY.REC1, DUTY.REC2,
+  DUTY.EDU_T, DUTY.ANNUAL, DUTY.HEALTH,
+  DUTY.SICK, DUTY.BLOOD, DUTY.CARE, DUTY.BIRTH, DUTY.ETC,
+]);
+
+const WORK_DUTIES = new Set([
+  DUTY.D, DUTY.E, DUTY.N, DUTY.N_FULL, DUTY.EDU, DUTY.EDU_R, DUTY.D9, DUTY.D10,
+]);
+
+const NIGHT_DUTIES   = new Set([DUTY.N, DUTY.N_FULL]);
+const FIXED_AUTO_TYPES = new Set([NURSE_TYPE.HEAD, NURSE_TYPE.P_D, NURSE_TYPE.P_E]);
+const RECOVERY_DUTIES  = new Set([DUTY.REC1, DUTY.REC2]);
+
+const WANTED_PRIORITY = {
+  [DUTY.ANNUAL]: 1, [DUTY.MENSES]: 1, [DUTY.EDU]: 1, [DUTY.EDU_R]: 1,
+  [DUTY.HEALTH]: 2, [DUTY.EDU_T]: 2,
+  [DUTY.OFF]:    3,
+  [DUTY.D]:      3,  // 근무 Wanted (D/E)도 신청 가능
+  [DUTY.E]:      3,
+  [DUTY.ETC]:    4,
+};
+
+const NIGHT_ALLOWED_WANTED = new Set([
+  DUTY.OFF, DUTY.MENSES, DUTY.ANNUAL,
+  DUTY.EDU, DUTY.EDU_R, DUTY.EDU_T, DUTY.HEALTH, DUTY.ETC,
+]);
+
+const RULES = {
+  MAX_CONSEC_WORK:  5,
+  MAX_WEEK_WORK:    5,
+  MAX_MONTH_NIGHT:  6,
+  MIN_STAFF: { D: 6, E: 6, N: 6 },
+  MAX_STAFF: { D: 8, E: 8, N: 8 },
+  NIGHT_TARGET: { '여': 14, '남': 15 },
+  NIGHT_MIN_BLOCK: 2,
+  NIGHT_MAX_BLOCK: 3,
+  MAX_WANTED: 5,
+  OFF_MIN:  5,
+  OFF_MAX: 15,
+};
+
+const FORBIDDEN_PREV = {
+  [DUTY.D]:     new Set([DUTY.E, DUTY.N, DUTY.N_FULL, DUTY.EDU_R, DUTY.D9, DUTY.D10]),  // 9/10 뒤에 D 금지
+  [DUTY.E]:     new Set([DUTY.N, DUTY.N_FULL]),
+  [DUTY.EDU_R]: new Set([DUTY.E, DUTY.N, DUTY.N_FULL]),  // 필교 앞에 E/N 금지
+  [DUTY.D9]:    new Set([DUTY.E, DUTY.N, DUTY.N_FULL]),   // E/N→9 금지
+  [DUTY.D10]:   new Set([DUTY.E, DUTY.N, DUTY.N_FULL]),   // E/N→10 금지
+};
+
+// ──────────────────────────────────────────
+// 시트 이름 규칙 (새 구조)
+// ──────────────────────────────────────────
+const SHEET = {
+  HOLIDAYS:      '공휴일',       // Step1: 대상 월(B1) + 공휴일 체크박스
+  PREV_SCHED:    '전달근무표',   // Step2: 전달 결과표 붙여넣기
+  NURSES:        '간호사목록',   // Step3: 간호사 명단
+  FIXED:         '고정듀티',    // Step4: 고정 듀티 입력
+  WANTED:        'Wanted',      // Step5: Wanted 신청
+  OUTPUT_PREFIX: '근무표_',     // Step6: 생성된 근무표 + YYYYMM
+  RESULT_PREFIX: '결과표_',     // Step8: 발행 후 결과 (다음 달 전달근무표용)
+};
+
+const SETTINGS_DAY_START_ROW = 4;
+
+const COL_NURSE = {
+  NAME:      0,
+  TYPE:      1,
+  GENDER:    2,
+  TEAM:      3,
+  PRECEPTOR: 4,
+};
+
+const DUTY_COLOR = {
+  [DUTY.D]:      '#D4EDDA',
+  [DUTY.E]:      '#FFF3CD',
+  [DUTY.N]:      '#CCE5FF',
+  [DUTY.N_FULL]: '#B8D4FF',
+  [DUTY.OFF]:    '#F8F9FA',
+  [DUTY.MENSES]: '#FCE4EC',
+  [DUTY.REC1]:   '#EDE7F6',
+  [DUTY.REC2]:   '#D1C4E9',
+  [DUTY.ANNUAL]: '#E8F5E9',
+  [DUTY.EDU]:    '#FFF9C4',
+  [DUTY.EDU_R]:  '#FFF176',
+  [DUTY.EDU_T]:  '#FFECB3',
+  [DUTY.SICK]:   '#FFCDD2',
+  [DUTY.HEAD_DUTY]: '#E3F2FD',
+  [DUTY.P_D_DUTY]:  '#E3F2FD',
+  [DUTY.P_E_DUTY]:  '#E3F2FD',
+};
+
+
+/**
+ * ============================================================
+ * Utils.gs — 공통 유틸리티 함수
+ * ============================================================
+ */
+
+function isWeekendOrHoliday(year, month, day, holidays) {
+  const dow = new Date(year, month - 1, day).getDay();
+  return dow === 0 || dow === 6 || (holidays instanceof Set && holidays.has(day));
+}
+
+function getDayOfWeek(year, month, day) {
+  return new Date(year, month - 1, day).getDay();
+}
+
+function isOff(duty) {
+  return OFF_DUTIES.has(duty || '');
+}
+
+function isWork(duty) {
+  return WORK_DUTIES.has(duty || '');
+}
+
+function isNight(duty) {
+  return NIGHT_DUTIES.has(duty);
+}
+
+function isRecovery(duty) {
+  return RECOVERY_DUTIES.has(duty);
+}
+
+// 자동 배정된 민감한 듀티(나이트, 특수 오프)를 알고리즘 수정에서 보호하는 함수
+function isFixedDuty(duty) {
+  if (!duty) return false;
+  if (isNight(duty) || duty === DUTY.N_FULL) return true;
+  if (isOff(duty) && duty !== DUTY.OFF) return true;
+  if (isRecovery(duty)) return true;
+  if (duty === DUTY.EDU || duty === DUTY.EDU_R) return true;
+  if (duty === DUTY.D9 || duty === DUTY.D10) return true;  // 주말 특수 듀티 보호
+  return false;
+}
+
+function getSlot(sched, nurseIdx, d, prevHistory, totalDays) {
+  if (d >= 0 && d < totalDays) return sched[nurseIdx][d] || '';
+  if (d < 0) {
+    const histIdx = 7 + d;
+    if (histIdx >= 0 && prevHistory[nurseIdx]) {
+      return prevHistory[nurseIdx][histIdx] || '';
+    }
+  }
+  return '';
+}
+
+function getTotalDays(yyyymm) {
+  const year  = parseInt(yyyymm.slice(0, 4), 10);
+  const month = parseInt(yyyymm.slice(4, 6), 10);
+  return new Date(year, month, 0).getDate();
+}
+
+function getPrevMonth(yyyymm) {
+  const year  = parseInt(yyyymm.slice(0, 4), 10);
+  const month = parseInt(yyyymm.slice(4, 6), 10);
+  const prev  = new Date(year, month - 2, 1);
+  return `${prev.getFullYear()}${String(prev.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function getNextMonth(yyyymm) {
+  const year  = parseInt(yyyymm.slice(0, 4), 10);
+  const month = parseInt(yyyymm.slice(4, 6), 10);
+  const next  = new Date(year, month, 1);
+  return `${next.getFullYear()}${String(next.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function getOrCreateSheet(ss, name) {
+  return ss.getSheetByName(name) || ss.insertSheet(name);
+}
+
+function recreateSheet(ss, name) {
+  const existing = ss.getSheetByName(name);
+  if (existing) ss.deleteSheet(existing);
+  return ss.insertSheet(name);
+}
+
+function styleHeader(range, bgColor) {
+  range
+    .setFontWeight('bold')
+    .setBackground(bgColor || '#4A90D9')
+    .setFontColor('#FFFFFF')
+    .setHorizontalAlignment('center');
+}
+
+function colToLetter(col) {
+  let letter = '';
+  while (col > 0) {
+    const rem = (col - 1) % 26;
+    letter = String.fromCharCode(65 + rem) + letter;
+    col = Math.floor((col - 1) / 26);
+  }
+  return letter;
+}
+
+function normalize(val) {
+  if (val === null || val === undefined) return '';
+  return String(val).trim();
+}
+
+function argMin(arr) {
+  let minVal = Infinity, minIdx = -1;
+  arr.forEach((v, i) => { if (v < minVal) { minVal = v; minIdx = i; } });
+  return minIdx;
+}
+
+function log(msg) { Logger.log(msg); }
+
+
+/**
+ * ============================================================
+ * DataLoader.gs — 시트 데이터 로드
+ * ============================================================
+ */
+
+function getTargetYYYYMM(ss) {
+  const sh = ss.getSheetByName(SHEET.HOLIDAYS);
+  if (!sh) throw new Error("'설정' 시트가 없습니다.\n기본 시트 초기화를 먼저 실행해 주세요.");
+  const val = normalize(sh.getRange('B1').getValue());
+  if (!/^\d{6}$/.test(val)) {
+    throw new Error("설정 시트 B1에 YYYYMM 형식으로 대상 월을 입력해 주세요.\n예: 202508");
+  }
+  return val;
+}
+
+function loadNurses(ss) {
+  const sh = ss.getSheetByName(SHEET.NURSES);
+  if (!sh) throw new Error(`'${SHEET.NURSES}' 시트를 찾을 수 없습니다.`);
+
+  const data   = sh.getDataRange().getValues();
+  const nurses = [];
+
+  for (let i = 1; i < data.length; i++) {
+    const row  = data[i];
+    const name = normalize(row[COL_NURSE.NAME]);
+    if (!name) continue;
+
+    nurses.push({
+      idx:         nurses.length,
+      name,
+      type:        normalize(row[COL_NURSE.TYPE]),
+      gender:      normalize(row[COL_NURSE.GENDER]) || '여',
+      team:        normalize(row[COL_NURSE.TEAM]),
+      preceptor:   normalize(row[COL_NURSE.PRECEPTOR]),
+      accumOff:   0,   
+      monthWanted: 0,
+    });
+  }
+
+  const invalidPreceptors = [];
+  nurses.forEach(n => {
+    if (n.type !== NURSE_TYPE.NEW || !n.preceptor) return;
+    const prec = nurses.find(p => p.name === n.preceptor);
+    if (prec && FIXED_AUTO_TYPES.has(prec.type)) {
+      invalidPreceptors.push(`${n.name} (프리셉터: ${prec.name} / ${prec.type})`);
+    }
+  });
+  if (invalidPreceptors.length > 0) {
+    throw new Error(
+      `❌ 프리셉터 설정 오류:\n수간호사/P-D/P-E는 프리셉터로 지정할 수 없습니다.\n\n` +
+      `문제 간호사:\n${invalidPreceptors.join('\n')}`
+    );
+  }
+
+  return nurses;
+}
+
+function loadHolidays(ss, year, month) {
+  const sh  = ss.getSheetByName(SHEET.HOLIDAYS);
+  const set = new Set();
+  if (!sh) return set;
+
+  const totalDays = new Date(year, month, 0).getDate();
+  for (let i = 0; i < totalDays; i++) {
+    const row     = SETTINGS_DAY_START_ROW + i;
+    const checked = sh.getRange(row, 3).getValue(); 
+    if (checked === true) set.add(i + 1);
+  }
+  return set;
+}
+
+function loadPrevHistory(ss, yyyymm, nurses) {
+  const hist = {};
+  nurses.forEach(n => { hist[n.idx] = new Array(7).fill(''); });
+
+  const sh = ss.getSheetByName(SHEET.PREV_SCHED);
+  if (!sh || sh.getLastRow() <= 1) return hist;
+
+  const data = sh.getDataRange().getValues();
+
+  const DATE_OFFSET = 3; 
+  let prevTotalDays = 0;
+  for (let c = DATE_OFFSET; c < data[0].length; c++) {
+    const v = parseInt(normalize(data[0][c]), 10);
+    if (!isNaN(v) && v > prevTotalDays) prevTotalDays = v;
+    else if (!isNaN(v) && v < prevTotalDays) break; 
+  }
+  if (prevTotalDays === 0) return hist;
+
+  const skipPrefixes = ['D 인원', 'E 인원', 'N 인원'];
+
+  for (let i = 1; i < data.length; i++) {
+    const name = normalize(data[i][0]);
+    if (!name || name.endsWith('팀')) continue;
+    if (skipPrefixes.some(p => name.startsWith(p))) continue;
+
+    const nurse = nurses.find(n => n.name === name);
+    if (!nurse) continue;
+
+    const last7 = [];
+    for (let d = prevTotalDays - 6; d <= prevTotalDays; d++) {
+      const colIdx = DATE_OFFSET + (d - 1);
+      last7.push(normalize(data[i][colIdx] || ''));
+    }
+    hist[nurse.idx] = last7;
+  }
+
+  return hist;
+}
+
+function loadPrevAccumData(ss, yyyymm, nurses) {
+  const sh = ss.getSheetByName(SHEET.PREV_SCHED);
+  if (!sh || sh.getLastRow() <= 1) return; 
+
+  const data        = sh.getDataRange().getValues();
+  const skipNames   = ['D 인원', 'E 인원', 'N 인원'];
+
+  for (let i = 1; i < data.length; i++) {
+    const name = normalize(data[i][0]);
+    if (!name || name.endsWith('팀') || skipNames.some(p => name.startsWith(p))) continue;
+
+    const nurse = nurses.find(n => n.name === name);
+    if (!nurse) continue;
+
+    const rawOff = parseFloat(normalize(data[i][2]));
+    if (!isNaN(rawOff)) nurse.accumOff = rawOff;
+  }
+}
+
+function loadFixedDuty(ss, yyyymm) {
+  const sh     = ss.getSheetByName(SHEET.FIXED);
+  const result = {};
+  if (!sh || sh.getLastRow() <= 1) return result;
+
+  const data      = sh.getDataRange().getValues();
+  const totalDays = getTotalDays(yyyymm);
+
+  for (let i = 1; i < data.length; i++) {
+    const name = normalize(data[i][0]);
+    if (!name) continue;
+    result[name] = {};
+
+    for (let d = 1; d <= totalDays; d++) {
+      const val = normalize(data[i][d]); 
+      if (val) result[name][d] = val;
+    }
+  }
+
+  return result;
+}
+
+function loadWanted(ss, yyyymm, nurses) {
+  const sh   = ss.getSheetByName(SHEET.WANTED);
+  const reqs = [];
+  if (!sh || sh.getLastRow() <= 1) return reqs;
+
+  const data      = sh.getDataRange().getValues();
+  const totalDays = getTotalDays(yyyymm);
+
+  for (let i = 1; i < data.length; i++) {
+    const name = normalize(data[i][0]);
+    if (!name) continue;
+
+    const nurse = nurses.find(n => n.name === name);
+    if (!nurse) continue;
+
+    for (let slot = 0; slot < 5; slot++) {
+      const dayVal   = normalize(data[i][1 + slot * 2]);
+      const wtypeVal = normalize(data[i][2 + slot * 2]);
+      if (!dayVal || !wtypeVal) continue;
+
+      const day = parseInt(dayVal, 10);
+      if (isNaN(day) || day < 1 || day > totalDays) continue;
+
+      if (nurse.type === NURSE_TYPE.NIGHT && !NIGHT_ALLOWED_WANTED.has(wtypeVal)) continue;
+
+      let primaryWtype = wtypeVal, fallbackWtype = null;
+      const orMatch = wtypeVal.match(/^(.+?)\s+or\s+(.+)$/i);
+      if (orMatch) {
+        primaryWtype  = normalize(orMatch[1]);
+        fallbackWtype = normalize(orMatch[2]);
+      }
+
+      const priority = WANTED_PRIORITY[primaryWtype] ?? WANTED_PRIORITY[fallbackWtype];
+      if (priority === undefined) continue;
+
+      reqs.push({ nurse, day, wtype: primaryWtype, fallbackWtype, priority });
+      nurse.monthWanted++;
+    }
+  }
+
+  reqs.sort((a, b) =>
+    a.priority !== b.priority ? a.priority - b.priority : a.day - b.day
+  );
+
+  return reqs;
+}
+
+function readScheduleFromSheet(sheet, nurses, totalDays) {
+  const sched      = nurses.map(() => new Array(totalDays).fill(''));
+  const data       = sheet.getDataRange().getValues();
+  const DATE_OFFSET = 3; 
+
+  const skipPrefixes = ['D 인원', 'E 인원', 'N 인원'];
+
+  for (let i = 1; i < data.length; i++) {
+    const name = normalize(data[i][0]);
+    if (!name) continue;
+    if (name.endsWith('팀')) continue;
+    if (skipPrefixes.some(p => name.startsWith(p))) continue;
+
+    const nurse = nurses.find(n => n.name === name);
+    if (!nurse) continue;
+
+    for (let d = 0; d < totalDays; d++) {
+      sched[nurse.idx][d] = normalize(data[i][DATE_OFFSET + d]) || '';
+    }
+  }
+
+  return sched;
+}
+
+
+/**
+ * ============================================================
+ * RuleChecker.gs — 전환 규칙 / 연속근무 / 주간근무 검증
+ * ============================================================
+ */
+
+function checkTransition(sched, nurseIdx, d, newDuty, prevHist, totalDays) {
+  const prev1 = getSlot(sched, nurseIdx, d - 1, prevHist, totalDays);
+  if (prev1 === '') return true;
+
+  const forbidden = FORBIDDEN_PREV[newDuty];
+  if (forbidden && forbidden.has(prev1)) return false;
+
+  if ((newDuty === DUTY.D || newDuty === DUTY.D9 || newDuty === DUTY.D10) && (isOff(prev1) || isRecovery(prev1))) {
+    let offCount = 1;
+    for (let i = d - 2; i >= d - 10; i--) {
+      const past = getSlot(sched, nurseIdx, i, prevHist, totalDays);
+      if (past === '') break;
+      if (isOff(past) || isRecovery(past)) {
+        offCount++;
+      } else if (isNight(past)) {
+        if (offCount === 1) return false;
+        break;
+      } else {
+        break;
+      }
+    }
+  }
+
+  return true;
+}
+
+function checkConsecutiveWork(sched, nurseIdx, d, prevHist, totalDays) {
+  let consec = 0;
+  for (let i = d - 1; i >= d - RULES.MAX_CONSEC_WORK; i--) {
+    const past = getSlot(sched, nurseIdx, i, prevHist, totalDays);
+    if (past === '') break;
+    if (isWork(past)) consec++;
+    else break;
+  }
+  return consec < RULES.MAX_CONSEC_WORK;
+}
+
+function checkWeeklyWork(sched, nurseIdx, d, prevHist, totalDays, year, month) {
+  const date = new Date(year, month - 1, d + 1);
+  const dow  = date.getDay();
+  const mondayOffset = dow === 0 ? -6 : -(dow - 1);
+
+  let weekWork = 0;
+  for (let offset = mondayOffset; offset < mondayOffset + 7; offset++) {
+    if (offset === 0) continue;
+    const checkD = d + offset;
+    const duty   = getSlot(sched, nurseIdx, checkD, prevHist, totalDays);
+    if (isWork(duty)) weekWork++;
+  }
+  return weekWork < RULES.MAX_WEEK_WORK;
+}
+
+function checkForwardTransition(sched, nurseIdx, d, newDuty, prevHist, totalDays) {
+  const next = getSlot(sched, nurseIdx, d + 1, prevHist, totalDays);
+  if (!next || next === '') return true;
+
+  const forbiddenPrev = FORBIDDEN_PREV[next];
+  if (forbiddenPrev && forbiddenPrev.has(newDuty)) return false;
+
+  if (isNight(newDuty)) {
+    const next2 = getSlot(sched, nurseIdx, d + 2, prevHist, totalDays);
+    if (next2 === '') return true;
+    let offCount = 0;
+    for (let i = d + 1; i < totalDays; i++) {
+      const v = getSlot(sched, nurseIdx, i, prevHist, totalDays);
+      if (v === '') break;
+      if (isOff(v) || isRecovery(v)) offCount++;
+      else {
+        if (v === DUTY.D && offCount === 1) return false;
+        break;
+      }
+    }
+  }
+
+  return true;
+}
+
+function canAssignWork(sched, nurseIdx, d, duty, prevHist, totalDays, year, month) {
+  if (!checkTransition(sched, nurseIdx, d, duty, prevHist, totalDays))        return false;
+  if (!checkForwardTransition(sched, nurseIdx, d, duty, prevHist, totalDays)) return false;
+  if (!checkConsecutiveWork(sched, nurseIdx, d, prevHist, totalDays))          return false;
+  if (!checkWeeklyWork(sched, nurseIdx, d, prevHist, totalDays, year, month)) return false;
+  return true;
+}
+
+function canAssignOff(sched, nurseIdx, d, duty, prevHist, totalDays) {
+  if (!checkTransition(sched, nurseIdx, d, duty, prevHist, totalDays))        return false;
+  if (!checkForwardTransition(sched, nurseIdx, d, duty, prevHist, totalDays)) return false;
+  return true;
+}
+
+function countGeneralStaff(sched, nurses, d) {
+  const counts = { D: 0, E: 0, N: 0 };
+  nurses
+    .filter(n =>
+      n.type === NURSE_TYPE.GENERAL ||
+      n.type === NURSE_TYPE.NEW     ||
+      n.type === NURSE_TYPE.NIGHT     
+    )
+    .forEach(n => {
+      const duty = sched[n.idx][d] || '';
+      if (duty === DUTY.D)                    counts.D++;
+      else if (duty === DUTY.E)               counts.E++;
+      else if (duty === DUTY.N || duty === DUTY.N_FULL) counts.N++; 
+    });
+  return counts;
+}
+
+function countTeamStaff(sched, nurses, team, d) {
+  const counts = { D: 0, E: 0 };
+  nurses
+    .filter(n => n.team === team &&
+      (n.type === NURSE_TYPE.GENERAL || n.type === NURSE_TYPE.NEW))
+    .forEach(n => {
+      const duty = sched[n.idx][d] || '';
+      if (duty === DUTY.D) counts.D++;
+      else if (duty === DUTY.E) counts.E++;
+    });
+  return counts;
+}
+
+function getTeams(nurses) {
+  return [...new Set(
+    nurses
+      .filter(n => n.team && (n.type === NURSE_TYPE.GENERAL || n.type === NURSE_TYPE.NEW))
+      .map(n => n.team)
+  )];
+}
+
+function countMonthlyNights(sched, nurseIdx, totalDays) {
+  let count = 0;
+  for (let d = 0; d < totalDays; d++) {
+    if (isNight(sched[nurseIdx][d])) count++;
+  }
+  return count;
+}
+
+function isAssigned(duty) {
+  return duty !== '' && duty !== null && duty !== undefined;
+}
+
+
+/**
+ * ============================================================
+ * Scheduler.gs — 핵심 배정 로직
+ * ============================================================
+ */
+
+function _runOnce(nurses, fixedMap, wanted, prevHist, totalDays, year, month, holidays, locked) {
+  nurses.forEach(n => { n.monthWanted = 0; });
+  const sched = nurses.map(() => new Array(totalDays).fill(''));
+
+  step1_Fixed(sched, nurses, fixedMap, totalDays);
+  step2_AutoRoles(sched, nurses, totalDays, year, month, holidays);
+  step3_Wanted(sched, nurses, wanted, totalDays, prevHist, year, month);
+  step4_WeekendHolidayDuty(sched, nurses, totalDays, prevHist, year, month, holidays, locked);
+  step5_NightDedicatedOff(sched, nurses, totalDays);
+  step6_GeneralDuty(sched, nurses, totalDays, prevHist, year, month, holidays);
+  enforceOffMax(sched, nurses, totalDays, prevHist, year, month, locked);
+  step7_PreceptorMatch(sched, nurses, totalDays, prevHist, year, month, holidays, locked);
+
+  return sched;
+}
+
+function countViolations(sched, nurses, prevHist, totalDays, year, month, holidays) {
+  let count = 0;
+  const targets = nurses.filter(n => !FIXED_AUTO_TYPES.has(n.type));
+
+  targets.forEach(nurse => {
+    let consec = 0;
+    for (let d = 0; d < totalDays; d++) {
+      const cur = sched[nurse.idx][d];
+
+      if (!isAssigned(cur)) { consec = 0; continue; }
+
+      if (d >= 1) {
+        const prev1 = sched[nurse.idx][d - 1] || '';
+        if (cur === DUTY.D && prev1 === DUTY.E)  count++;
+        if (cur === DUTY.D && prev1 === DUTY.EDU_R) count++;  // 필교 뒤에 D 금지
+        if (cur === DUTY.E && isNight(prev1))    count++;
+        if (cur === DUTY.D && isNight(prev1))    count++;
+        if (cur === DUTY.EDU_R && (prev1 === DUTY.E || isNight(prev1))) count++;
+        // 9/10 전환 금지 규칙
+        if ((cur === DUTY.D9 || cur === DUTY.D10) && isNight(prev1))           count++;
+        if ((cur === DUTY.D9 || cur === DUTY.D10) && prev1 === DUTY.E)         count++;
+        if (cur === DUTY.D && (prev1 === DUTY.D9 || prev1 === DUTY.D10))       count++;
+
+        if (d >= 2) {
+          const prev2 = sched[nurse.idx][d - 2] || '';
+          if (cur === DUTY.D && (isOff(prev1) || isRecovery(prev1)) && isNight(prev2)) count++;
+          // N-/-9 및 N-/-10 금지
+          if ((cur === DUTY.D9 || cur === DUTY.D10) && (isOff(prev1) || isRecovery(prev1)) && isNight(prev2)) count++;
+        }
+      }
+
+      if (isWork(cur)) {
+        consec++;
+        if (consec > RULES.MAX_CONSEC_WORK) count++;
+      } else {
+        consec = 0;
+      }
+    }
+  });
+
+  for (let d = 0; d < totalDays; d++) {
+    const counts = countGeneralStaff(sched, nurses, d);
+    [DUTY.D, DUTY.E, DUTY.N].forEach(s => {
+      const n = counts[s] || 0;
+      if (n < RULES.MIN_STAFF[s]) count++;
+      if (n > RULES.MAX_STAFF[s]) count++;
+    });
+  }
+
+  // D9/D10 인원 체크 (year/month/holidays 제공 시) — 일반 간호사만 대상
+  if (year && month && holidays) {
+    const allNurses = nurses.filter(n =>
+      n.type === NURSE_TYPE.GENERAL
+    );
+    for (let d = 0; d < totalDays; d++) {
+      const dow = new Date(year, month - 1, d + 1).getDay();
+      const isHoliday_ = holidays instanceof Set && holidays.has(d + 1);
+
+      if (dow === 6) {  // 토요일: 정확히 1명이 D9
+        const cnt9 = allNurses.filter(n => sched[n.idx][d] === DUTY.D9).length;
+        if (cnt9 !== 1) count++;
+      }
+      if (dow === 0 || isHoliday_) {  // 일요일/공휴일: 정확히 1명이 D10
+        const cnt10 = allNurses.filter(n => sched[n.idx][d] === DUTY.D10).length;
+        if (cnt10 !== 1) count++;
+      }
+    }
+  }
+
+  return count;
+}
+
+function countWantedMet(sched, wanted) {
+  return wanted.filter(req => {
+    const raw = sched[req.nurse.idx][req.day - 1] || '';
+    return raw === req.wtype || (req.fallbackWtype && raw === req.fallbackWtype);
+  }).length;
+}
+
+function scoreSchedule(sched, nurses, wanted, prevHist, totalDays) {
+  let score = 0;
+
+  wanted.forEach(req => {
+    const raw = sched[req.nurse.idx][req.day - 1] || '';
+    const met = raw === req.wtype || (req.fallbackWtype && raw === req.fallbackWtype);
+    if (!met) score -= 10;
+  });
+
+  const targets = nurses.filter(n => !FIXED_AUTO_TYPES.has(n.type));
+  targets.forEach(nurse => {
+    for (let d = 0; d < totalDays; d++) {
+      const cur = sched[nurse.idx][d] || '';
+
+      const p1 = getSlot(sched, nurse.idx, d - 1, prevHist, totalDays);
+      const p2 = getSlot(sched, nurse.idx, d - 2, prevHist, totalDays);
+      const p3 = getSlot(sched, nurse.idx, d - 3, prevHist, totalDays);
+
+      // DDDDD: D 5연속
+      if (cur === DUTY.D) {
+        let consecD = 1;
+        for (let i = d - 1; i >= d - 4; i--) {
+          if (getSlot(sched, nurse.idx, i, prevHist, totalDays) === DUTY.D) consecD++;
+          else break;
+        }
+        if (consecD >= 5) score -= 5;
+
+        // N//D: N → 오프 2개 → D
+        if ((isOff(p1) || isRecovery(p1)) && (isOff(p2) || isRecovery(p2)) && isNight(p3)) score -= 5;
+
+        // E/D: E → 오프 1개 → D
+        if ((isOff(p1) || isRecovery(p1)) && p2 === DUTY.E) score -= 5;
+      }
+
+      // N/E: N → 오프 1개 → E
+      if (cur === DUTY.E) {
+        if ((isOff(p1) || isRecovery(p1)) && isNight(p2)) score -= 5;
+
+        // /E/: 오프 → E → 오프
+        if ((isOff(p1) || isRecovery(p1))) {
+          const next1 = getSlot(sched, nurse.idx, d + 1, prevHist, totalDays);
+          if (next1 && (isOff(next1) || isRecovery(next1))) score -= 5;
+        }
+      }
+
+      // /D/: 오프 → D → 오프
+      if (cur === DUTY.D) {
+        if ((isOff(p1) || isRecovery(p1))) {
+          const next1 = getSlot(sched, nurse.idx, d + 1, prevHist, totalDays);
+          if (next1 && (isOff(next1) || isRecovery(next1))) score -= 5;
+        }
+      }
+
+      // /N/: 오프 → N → 오프
+      if (isNight(cur)) {
+        if ((isOff(p1) || isRecovery(p1))) {
+          const next1 = getSlot(sched, nurse.idx, d + 1, prevHist, totalDays);
+          if (next1 && (isOff(next1) || isRecovery(next1))) score -= 5;
+        }
+      }
+    }
+  });
+
+  return score;
+}
+
+function _variance(arr) {
+  if (arr.length === 0) return 0;
+  const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+  return arr.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / arr.length;
+}
+
+
+/**
+ * ============================================================
+ * step9_WantedRepair — Wanted 백트래킹 수리 (유연성 및 1:1 맞교환 추가)
+ * ============================================================
+ */
+function step9_WantedRepair(sched, nurses, wanted, prevHist, totalDays, year, month, locked) {
+
+  const snapSched = sched.map(r => [...r]);
+  const precNewIdxSet = new Set();
+  nurses.filter(n => n.type === NURSE_TYPE.NEW && n.preceptor).forEach(n => {
+    precNewIdxSet.add(n.idx);
+    const prec = nurses.find(p => p.name === n.preceptor);
+    if (prec) precNewIdxSet.add(prec.idx);
+  });
+
+  const reflectedMap = {};
+  wanted.forEach(req => {
+    const d   = req.day - 1;
+    const cur = sched[req.nurse.idx][d] || '';
+    if (cur === req.wtype || (req.fallbackWtype && cur === req.fallbackWtype)) {
+      reflectedMap[`${req.nurse.idx}_${d}`] = req;
+    }
+  });
+
+  const tieQueue = [];
+
+  function tryAssignWanted(req) {
+    const { nurse, day, wtype, fallbackWtype } = req;
+    const d   = day - 1;
+    const key = `${nurse.idx}_${d}`;
+
+    const cur = sched[nurse.idx][d] || '';
+    if (cur === wtype || (fallbackWtype && cur === fallbackWtype)) return true;
+
+    const oldVal = sched[nurse.idx][d];
+
+    // [핵심 보호] 사용자가 고정한 값은 절대 건드리지 않음
+    if (locked[nurse.idx][d]) return false;
+    if (isFixedDuty(oldVal)) return false; 
+
+    // [개선 1] 전체 위반 0건이 아니라, "현재 위반 건수"를 기준으로 삼음
+    const baseViols = countViolations(sched, nurses, prevHist, totalDays);
+
+    // [개선 2] 1:1 근무 맞교환 (내가 D인데 E를 원할 때, E인 사람과 스왑)
+    if (isWork(wtype) && isWork(oldVal)) {
+      const swapCands = nurses.filter(m => {
+        if (m.idx === nurse.idx) return false;
+        if (FIXED_AUTO_TYPES.has(m.type) || m.type === NURSE_TYPE.NIGHT) return false;
+        if (locked[m.idx][d] || isFixedDuty(sched[m.idx][d])) return false;
+        return sched[m.idx][d] === wtype; // 내가 원하는 듀티를 가진 사람
+      });
+
+      for (const m of swapCands) {
+        const mBackup = sched[m.idx][d];
+        sched[m.idx][d] = oldVal; // 상대방이 내 듀티를 가져감
+        sched[nurse.idx][d] = wtype; // 내가 상대방 듀티를 가져옴
+        
+        if (countViolations(sched, nurses, prevHist, totalDays) <= baseViols) {
+          reflectedMap[key] = req;
+          log(`[Step9] 1:1 맞교환 반영: ${nurse.name}(${oldVal}→${wtype}) ↔ ${m.name}`);
+          return true;
+        }
+        // 실패 시 롤백
+        sched[m.idx][d] = mBackup;
+        sched[nurse.idx][d] = oldVal;
+      }
+    }
+
+    let goto_B   = false;
+
+    if (isWork(wtype)) {
+      const dayCounts = countGeneralStaff(sched, nurses, d);
+      const cntKey    = isNight(wtype) ? DUTY.N : wtype;
+      if ((dayCounts[cntKey] || 0) >= RULES.MAX_STAFF[cntKey]) {
+        goto_B = true;
+      }
+    }
+
+    // 1. 단순 교체 (정원이 남거나, 오프를 원할 때 대타 구하기)
+    if (!goto_B) {
+      sched[nurse.idx][d] = wtype;
+      let compensator = null;
+      if (isOff(wtype) && isWork(oldVal)) {
+        const shortage = oldVal;
+        const dayCnts  = countGeneralStaff(sched, nurses, d);
+        if ((dayCnts[shortage] || 0) < RULES.MIN_STAFF[shortage]) {
+          for (const cand of nurses) {
+            if (cand.idx === nurse.idx) continue;
+            if (FIXED_AUTO_TYPES.has(cand.type) || cand.type === NURSE_TYPE.NIGHT) continue;
+            if (precNewIdxSet.has(cand.idx)) continue;
+            
+            const candCur = sched[cand.idx][d];
+            if (candCur && candCur !== DUTY.OFF) continue;
+            if (locked[cand.idx][d]) continue;
+
+            const offCntC = sched[cand.idx].filter(v => isOff(v) && !isRecovery(v)).length;
+            if (offCntC >= RULES.OFF_MAX) continue;
+            const cnts2 = countGeneralStaff(sched, nurses, d);
+            if ((cnts2[shortage] || 0) >= RULES.MAX_STAFF[shortage]) continue;
+            if (!canAssignWork(sched, cand.idx, d, shortage, prevHist, totalDays, year, month)) continue;
+            
+            compensator = { nurse: cand, oldVal: candCur };
+            sched[cand.idx][d] = shortage;
+            break;
+          }
+        }
+      }
+      
+      // [개선 1 적용] 전체 위반이 늘어나지 않으면 승인!
+      if (countViolations(sched, nurses, prevHist, totalDays) <= baseViols) {
+        reflectedMap[key] = req;
+        log(`[Step9] 반영: ${nurse.name} ${day}일 → ${wtype}${compensator ? ` (대타: ${compensator.nurse.name} ${oldVal})` : ''}`);
+        return true;
+      }
+      sched[nurse.idx][d] = oldVal;
+      if (compensator) sched[compensator.nurse.idx][d] = compensator.oldVal;
+      goto_B = isWork(wtype);
+    }
+
+    // 2. 밀어내기 (내가 원하는 근무 정원이 찼을 때 누군가를 오프로 밀어냄)
+    if (isWork(wtype)) {
+      const dayCounts2 = countGeneralStaff(sched, nurses, d);
+      const countKey   = isNight(wtype) ? DUTY.N : wtype;
+      if (goto_B || (dayCounts2[countKey] || 0) >= RULES.MAX_STAFF[countKey]) {
+        const pushCandidates = nurses.filter(m => {
+          if (m.idx === nurse.idx) return false;
+          if (FIXED_AUTO_TYPES.has(m.type) || m.type === NURSE_TYPE.NIGHT) return false;
+          if (locked[m.idx][d]) return false;
+
+          const mDuty = sched[m.idx][d] || '';
+          const mKey  = (mDuty === DUTY.N || mDuty === DUTY.N_FULL) ? DUTY.N : mDuty;
+          return mKey === countKey;
+        });
+
+        for (const m of pushCandidates) {
+          const mKey    = `${m.idx}_${d}`;
+          const mBackup = sched[m.idx][d];
+          const mWanted = reflectedMap[mKey];
+
+          sched[m.idx][d]      = DUTY.OFF;
+          sched[nurse.idx][d]  = wtype;
+
+          if (countViolations(sched, nurses, prevHist, totalDays) <= baseViols) {
+            if (mWanted) {
+              const winner = resolveConflict([req, mWanted]);
+              if (winner === null) {
+                sched[m.idx][d]     = mBackup;
+                sched[nurse.idx][d] = oldVal;
+                tieQueue.push(req);
+                return false;
+              }
+              if (winner.nurse.idx !== nurse.idx) {
+                sched[m.idx][d]     = mBackup;
+                sched[nurse.idx][d] = oldVal;
+                return false;
+              }
+              sched[m.idx][d] = snapSched[m.idx][d];
+              delete reflectedMap[mKey];
+              if (countViolations(sched, nurses, prevHist, totalDays) <= baseViols) {
+                reflectedMap[key] = req;
+                log(`[Step9] 충돌 승리 반영: ${nurse.name} ${day}일 → ${wtype} (${m.name} 복원)`);
+                return true;
+              } else {
+                sched[m.idx][d]     = mBackup;
+                sched[nurse.idx][d] = oldVal;
+                if (mWanted) reflectedMap[mKey] = mWanted;
+                return false;
+              }
+            } else {
+              reflectedMap[key] = req;
+              log(`[Step9] 밀어내기 반영: ${nurse.name} ${day}일 → ${wtype} (${m.name} 오프)`);
+              return true;
+            }
+          } else {
+            sched[m.idx][d]     = mBackup;
+            sched[nurse.idx][d] = oldVal;
+          }
+        }
+      }
+    }
+
+    if (fallbackWtype) {
+      sched[nurse.idx][d] = fallbackWtype;
+      if (countViolations(sched, nurses, prevHist, totalDays) <= baseViols) {
+        reflectedMap[key] = { ...req, wtype: fallbackWtype };
+        log(`[Step9] fallback 반영: ${nurse.name} ${day}일 → ${fallbackWtype}`);
+        return true;
+      }
+      sched[nurse.idx][d] = oldVal;
+    }
+
+    return false;
+  }
+
+  const MAX_PASSES = 3;
+
+  function buildUnmetByNurse() {
+    return nurses
+      .filter(n => !FIXED_AUTO_TYPES.has(n.type))
+      .map(nurse => {
+        const unmet = wanted.filter(req => {
+          if (req.nurse.idx !== nurse.idx) return false;
+          const cur = sched[nurse.idx][req.day - 1] || '';
+          return cur !== req.wtype && !(req.fallbackWtype && cur === req.fallbackWtype);
+        });
+        return { nurse, unmet };
+      })
+      .filter(x => x.unmet.length > 0)
+      .sort((a, b) => {
+        if (b.unmet.length !== a.unmet.length) return b.unmet.length - a.unmet.length;
+        if (a.nurse.monthWanted !== b.nurse.monthWanted) return a.nurse.monthWanted - b.nurse.monthWanted;
+        return b.nurse.accumOff - a.nurse.accumOff;
+      });
+  }
+
+  for (let pass = 0; pass < MAX_PASSES; pass++) {
+    const currentUnmet = buildUnmetByNurse();
+    if (currentUnmet.length === 0) break;
+
+    let anyProgress = false;
+    for (const { unmet } of currentUnmet) {
+      for (const req of unmet) {
+        const result = tryAssignWanted(req);
+        if (result) anyProgress = true;
+      }
+    }
+    if (!anyProgress) break;
+  }
+
+  for (const req of tieQueue) {
+    tryAssignWanted(req);
+  }
+
+  const newNursesWithOffWanted = nurses.filter(n =>
+    n.type === NURSE_TYPE.NEW && n.preceptor &&
+    wanted.some(req => req.nurse.idx === n.idx && isOff(req.wtype))
+  );
+
+  newNursesWithOffWanted.forEach(newNurse => {
+    const preceptor = nurses.find(p => p.name === newNurse.preceptor);
+    if (!preceptor) return;
+
+    const offWanteds = wanted.filter(req =>
+      req.nurse.idx === newNurse.idx && isOff(req.wtype)
+    );
+
+    offWanteds.forEach(req => {
+      const d   = req.day - 1;
+      if (locked[newNurse.idx][d]) return;
+      
+      const cur = sched[newNurse.idx][d] || '';
+
+      if (isOff(cur) || isRecovery(cur)) return;
+      const precDuty = sched[preceptor.idx][d] || '';
+      if (!isWork(precDuty)) return;
+      if (!canAssignOff(sched, newNurse.idx, d, DUTY.OFF, prevHist, totalDays)) return;
+      
+      const offCnt = sched[newNurse.idx].filter(v => isOff(v) && !isRecovery(v)).length;
+      if (offCnt >= RULES.OFF_MAX) return;
+
+      const oldVal = cur;
+      const baseV = countViolations(sched, nurses, prevHist, totalDays);
+      
+      sched[newNurse.idx][d] = DUTY.OFF;
+      if (countViolations(sched, nurses, prevHist, totalDays) <= baseV) {
+        log(`[Step9-NewOff] ${newNurse.name} ${d+1}일 ${oldVal}→오프 (프리셉터 ${preceptor.name} 근무중)`);
+      } else {
+        sched[newNurse.idx][d] = oldVal;
+      }
+    });
+  });
+}
+
+function runBestOf(ss, yyyymm) {
+  const year      = parseInt(yyyymm.slice(0, 4), 10);
+  const month     = parseInt(yyyymm.slice(4, 6), 10);
+  const totalDays = getTotalDays(yyyymm);
+
+  const nurses   = loadNurses(ss);
+  const holidays = loadHolidays(ss, year, month);
+  const prevHist = loadPrevHistory(ss, yyyymm, nurses);
+  loadPrevAccumData(ss, yyyymm, nurses);
+  const fixedMap = loadFixedDuty(ss, yyyymm);
+  const wanted   = loadWanted(ss, yyyymm, nurses);
+
+  const locked = nurses.map(() => new Array(totalDays).fill(false));
+  nurses.forEach(nurse => {
+    const fixed = fixedMap[nurse.name];
+    if (fixed) {
+      for (let d = 1; d <= totalDays; d++) {
+        if (fixed[d]) locked[nurse.idx][d - 1] = true;
+      }
+    }
+    if (FIXED_AUTO_TYPES.has(nurse.type)) {
+      for (let d = 0; d < totalDays; d++) {
+        locked[nurse.idx][d] = true;
+      }
+    }
+  });
+
+  const generalIdxList = nurses
+    .filter(n => n.type === NURSE_TYPE.GENERAL || n.type === NURSE_TYPE.NEW)
+    .map(n => n.idx);
+
+  const CANDIDATES = 20;
+  const candidates = [];
+  for (let t = 0; t < CANDIDATES; t++) {
+    _shuffleNurseOrder(nurses, generalIdxList);
+    const sched = _runOnce(nurses, fixedMap, wanted, prevHist, totalDays, year, month, holidays, locked);
+    const viols = countViolations(sched, nurses, prevHist, totalDays, year, month, holidays);
+    candidates.push({ sched: sched.map(r => [...r]), viols, tryNum: t + 1 });
+    log(`[Phase1] 후보 ${t + 1}/${CANDIDATES}: 위반 ${viols}건`);
+  }
+
+  nurses.sort((a, b) => a.idx - b.idx);
+  const repaired = candidates.map((cand, i) => {
+    const sched = cand.sched.map(r => [...r]);
+    step8_RepairViolations(sched, nurses, totalDays, prevHist, wanted, year, month, locked, holidays);
+    const viols     = countViolations(sched, nurses, prevHist, totalDays, year, month, holidays);
+    const wantedMet = countWantedMet(sched, wanted);
+    log(`[Phase2] 후보 ${i + 1} 수리 후: 위반 ${viols}건, Wanted ${wantedMet}건`);
+    return { sched, viols, wantedMet, tryNum: cand.tryNum };
+  });
+
+  const cleanOnes = repaired.filter(r => r.viols === 0);
+  log(`[Phase3] 위반 0건 후보: ${cleanOnes.length}개`);
+
+  const step9Pool = cleanOnes.length > 0 ? cleanOnes : (() => {
+    const minViols = Math.min(...repaired.map(r => r.viols));
+    return repaired.filter(r => r.viols === minViols);
+  })();
+
+  // [개선 3] 위반이 0건이 아니더라도 무조건 Wanted 수리(Step 9)를 시도하도록 수정
+  const afterStep9 = step9Pool.map((cand, i) => {
+    const sched = cand.sched.map(r => [...r]);
+    const baseViols = cand.viols; // 수리 전 위반 건수 기억
+
+    // 무조건 시도
+    step9_WantedRepair(sched, nurses, wanted, prevHist, totalDays, year, month, locked);
+    const newViols = countViolations(sched, nurses, prevHist, totalDays, year, month, holidays);
+    
+    // Wanted 반영하느라 오히려 위반이 늘어난 최악의 경우에만 롤백
+    if (newViols > baseViols) {
+      log(`[Phase3.5] 후보 ${cand.tryNum}: step9 후 위반 증가(${baseViols}→${newViols}) → 이전 상태 유지`);
+      return { ...cand, sched: cand.sched.map(r => [...r]) };
+    }
+    
+    const wantedMet = countWantedMet(sched, wanted);
+    log(`[Phase3.5] 후보 ${cand.tryNum}: Wanted ${wantedMet}건 반영 (위반 ${newViols}건 유지)`);
+    return { sched, viols: newViols, wantedMet, tryNum: cand.tryNum };
+  });
+
+  let chosen = afterStep9[0], bestScore = -Infinity;
+  afterStep9.forEach(cand => {
+    const sc = scoreSchedule(cand.sched, nurses, wanted, prevHist, totalDays);
+    log(`[Phase4] 후보 ${cand.tryNum}: 점수 ${sc}, Wanted ${cand.wantedMet}건`);
+    if (sc > bestScore) { bestScore = sc; chosen = cand; }
+  });
+  log(`[Phase4] 최종: 후보 ${chosen.tryNum} / 점수 ${bestScore} / 위반 ${chosen.viols}건`);
+
+  // ============================================================
+  // [Phase 5] ILS — Iterated Local Search
+  //   현재 최선 후보를 반복적으로 교란(perturb) → 재건(rebuild) →
+  //   수리(repair) 하여 로컬 최적에서 탈출하고 해를 개선한다.
+  // ============================================================
+  const ILS_ITER = 30;
+  let ilsBest = {
+    sched: chosen.sched.map(r => [...r]),
+    score: bestScore,
+    viols: chosen.viols,
+  };
+
+  for (let iter = 0; iter < ILS_ITER; iter++) {
+    // 1. 교란: D/E/OFF 일부를 비워 새로운 탐색 공간 확보
+    const perturbed = _perturbSched(ilsBest.sched, nurses, locked, totalDays);
+
+    // 2. 재건: 빈 셀에 Wanted 우선 배정 후 일반 배정 로직으로 채움
+    nurses.forEach(n => { n.monthWanted = 0; });
+    step3_Wanted(perturbed, nurses, wanted, totalDays, prevHist, year, month);
+    step6_GeneralDuty(perturbed, nurses, totalDays, prevHist, year, month, holidays);
+    enforceOffMax(perturbed, nurses, totalDays, prevHist, year, month, locked);
+    step7_PreceptorMatch(perturbed, nurses, totalDays, prevHist, year, month, holidays, locked);
+
+    // 3. 위반 수리
+    step8_RepairViolations(perturbed, nurses, totalDays, prevHist, wanted, year, month, locked, holidays);
+    const viols = countViolations(perturbed, nurses, prevHist, totalDays, year, month, holidays);
+
+    // 4. Wanted 반영 (위반이 악화되지 않는 경우에만)
+    if (viols <= ilsBest.viols) {
+      step9_WantedRepair(perturbed, nurses, wanted, prevHist, totalDays, year, month, locked);
+    }
+
+    const newViols = countViolations(perturbed, nurses, prevHist, totalDays, year, month, holidays);
+    const newScore = scoreSchedule(perturbed, nurses, wanted, prevHist, totalDays);
+    log(`[ILS] 반복 ${iter + 1}/${ILS_ITER}: 위반 ${newViols}건, 점수 ${newScore}`);
+
+    // 5. 수용 기준: 위반 감소 OR (위반 동일 AND 점수 향상)
+    if (newViols < ilsBest.viols || (newViols <= ilsBest.viols && newScore > ilsBest.score)) {
+      ilsBest = { sched: perturbed.map(r => [...r]), score: newScore, viols: newViols };
+      log(`[ILS] ✓ 개선: 위반 ${newViols}건, 점수 ${newScore}`);
+    }
+  }
+
+  log(`[ILS] 완료 — 위반 ${ilsBest.viols}건, 점수 ${ilsBest.score} (초기 위반 ${chosen.viols}건, 점수 ${bestScore})`);
+
+  return { sched: ilsBest.sched, nurses, holidays, prevHist, year, month, totalDays,
+           finalViols: ilsBest.viols, wantedMet: countWantedMet(ilsBest.sched, wanted),
+           cleanCount: cleanOnes.length, wanted };
+}
+
+function _shuffleNurseOrder(nurses, generalIdxList) {
+  const positions = generalIdxList.map(idx => nurses.findIndex(n => n.idx === idx));
+  for (let i = positions.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const pi = positions[i], pj = positions[j];
+    [nurses[pi], nurses[pj]] = [nurses[pj], nurses[pi]];
+  }
+}
+
+/**
+ * ILS 교란 함수: 현재 최선해의 일부 D/E/OFF 배정을 무작위로 초기화하여
+ * 로컬 최적에서 탈출할 수 있도록 새로운 탐색 공간을 개척한다.
+ * - K명의 일반/신규 간호사를 선택, 각각 N일의 배정을 비운다.
+ * - 고정(locked), 야간, 특수휴가, 교육 셀은 건드리지 않는다.
+ */
+function _perturbSched(sched, nurses, locked, totalDays) {
+  const K_NURSES = 4; // 교란할 간호사 수
+  const N_DAYS   = 5; // 간호사당 초기화할 일수
+
+  const copy = sched.map(r => [...r]);
+
+  const pool = nurses.filter(n =>
+    n.type === NURSE_TYPE.GENERAL || n.type === NURSE_TYPE.NEW
+  );
+
+  const shuffled = [...pool].sort(() => Math.random() - 0.5);
+  const selected = shuffled.slice(0, Math.min(K_NURSES, shuffled.length));
+
+  for (const nurse of selected) {
+    const days = Array.from({ length: totalDays }, (_, i) => i)
+      .sort(() => Math.random() - 0.5)
+      .slice(0, N_DAYS);
+
+    for (const d of days) {
+      if (locked[nurse.idx][d]) continue;
+      const cur = copy[nurse.idx][d];
+      if (!cur) continue;
+      // D, E, / 만 초기화 (야간·특수휴가·교육 등은 유지)
+      if (cur !== DUTY.D && cur !== DUTY.E && cur !== DUTY.OFF) continue;
+      copy[nurse.idx][d] = '';
+    }
+  }
+
+  return copy;
+}
+
+
+function step1_Fixed(sched, nurses, fixedMap, totalDays) {
+  nurses.forEach(nurse => {
+    const fixed = fixedMap[nurse.name];
+    if (!fixed) return;
+    for (let d = 1; d <= totalDays; d++) {
+      if (fixed[d]) sched[nurse.idx][d - 1] = fixed[d];
+    }
+  });
+}
+
+
+function step2_AutoRoles(sched, nurses, totalDays, year, month, holidays) {
+  nurses.forEach(nurse => {
+    if (!FIXED_AUTO_TYPES.has(nurse.type)) return;
+    for (let d = 0; d < totalDays; d++) {
+      if (sched[nurse.idx][d]) continue;
+      const isOff_ = isWeekendOrHoliday(year, month, d + 1, holidays);
+      if (nurse.type === NURSE_TYPE.HEAD)  sched[nurse.idx][d] = isOff_ ? DUTY.OFF : DUTY.HEAD_DUTY;
+      if (nurse.type === NURSE_TYPE.P_D)   sched[nurse.idx][d] = isOff_ ? DUTY.OFF : DUTY.P_D_DUTY;
+      if (nurse.type === NURSE_TYPE.P_E)   sched[nurse.idx][d] = isOff_ ? DUTY.OFF : DUTY.P_E_DUTY;
+    }
+  });
+}
+
+
+function _pullPreceptorToMatch(nurse, d, assignedDuty, sched, nurses, newToPreceptor, prevHist, totalDays, year, month) {
+  const prec = newToPreceptor[nurse.idx];
+  if (!prec) return;
+  if (isAssigned(sched[prec.idx][d])) return;
+
+  if (isWork(assignedDuty)) {
+    const cnt = countGeneralStaff(sched, nurses, d);
+    if ((cnt[assignedDuty] || 0) >= RULES.MAX_STAFF[assignedDuty]) return;
+    const ok = canAssignWork(sched, prec.idx, d, assignedDuty, prevHist, totalDays, year, month);
+    if (ok) {
+      sched[prec.idx][d] = assignedDuty;
+      log(`[Prec-Pull] ${nurse.name}(신규) → ${prec.name}(프리셉터) ${d+1}일 ${assignedDuty} 동기화`);
+    }
+  } else if (isOff(assignedDuty) || isRecovery(assignedDuty)) {
+    if (canAssignOff(sched, prec.idx, d, DUTY.OFF, prevHist, totalDays)) {
+      sched[prec.idx][d] = assignedDuty;
+      log(`[Prec-Pull] ${nurse.name}(신규) → ${prec.name}(프리셉터) ${d+1}일 ${assignedDuty} 동기화`);
+    }
+  }
+}
+
+function step3_Wanted(sched, nurses, wantedReqs, totalDays, prevHist, year, month) {
+  const processed = new Set();
+  const tieQueue  = [];
+
+  const preceptorNames = new Set(
+    nurses.filter(n => n.type === NURSE_TYPE.NEW && n.preceptor).map(n => n.preceptor)
+  );
+  const newNurseNames = new Set(
+    nurses.filter(n => n.type === NURSE_TYPE.NEW && n.preceptor).map(n => n.name)
+  );
+
+  const groupA = [], groupB = [];
+  wantedReqs.forEach((req, i) => {
+    if (preceptorNames.has(req.nurse.name) || newNurseNames.has(req.nurse.name)) groupA.push({ req, i });
+    else groupB.push({ req, i });
+  });
+
+  groupA.sort((a, b) => {
+    if (a.req.day !== b.req.day) return a.req.day - b.req.day;
+    const aIsNew = newNurseNames.has(a.req.nurse.name) ? 1 : 0;
+    const bIsNew = newNurseNames.has(b.req.nurse.name) ? 1 : 0;
+    return aIsNew - bIsNew;
+  });
+
+  const orderedReqs = [...groupA, ...groupB];
+
+  const groupMap = new Map();
+  wantedReqs.forEach((req, i) => {
+    const key = `${req.day}_${req.priority}`;
+    if (!groupMap.has(key)) groupMap.set(key, []);
+    groupMap.get(key).push({ req, i });
+  });
+
+  const newToPreceptor = {};
+  nurses.filter(n => n.type === NURSE_TYPE.NEW && n.preceptor).forEach(n => {
+    const prec = nurses.find(p => p.name === n.preceptor);
+    if (prec) newToPreceptor[n.idx] = prec;
+  });
+
+  function processReq(req, i) {
+    if (processed.has(i)) return;
+    const { nurse, day, wtype } = req;
+    const d = day - 1;
+
+    if (isAssigned(sched[nurse.idx][d])) { processed.add(i); return; }
+    if (wtype === DUTY.MENSES && sched[nurse.idx][d] === DUTY.N) { processed.add(i); return; }
+
+    const prec = newToPreceptor[nurse.idx];
+    if (prec) {
+      const precDuty = sched[prec.idx][d];
+      if (isAssigned(precDuty)) {
+        const effective = precDuty;
+        if (wtype !== effective && req.fallbackWtype !== effective) {
+          if (isWork(effective)) {
+            const cnt = countGeneralStaff(sched, nurses, d);
+            if ((cnt[effective] || 0) < RULES.MAX_STAFF[effective]) {
+              const ok = canAssignWork(sched, nurse.idx, d, effective, prevHist, totalDays, year, month);
+              if (ok) sched[nurse.idx][d] = effective;
+            }
+          } else if (isOff(effective) || isRecovery(effective)) {
+            if (canAssignOff(sched, nurse.idx, d, DUTY.OFF, prevHist, totalDays))
+              sched[nurse.idx][d] = effective;
+          }
+          processed.add(i);
+          return;
+        }
+      }
+    }
+
+    const transOk =
+      checkTransition(sched, nurse.idx, d, wtype, prevHist, totalDays) &&
+      checkForwardTransition(sched, nurse.idx, d, wtype, prevHist, totalDays);
+    if (!transOk) {
+      if (req.fallbackWtype) {
+        const fbOk =
+          checkTransition(sched, nurse.idx, d, req.fallbackWtype, prevHist, totalDays) &&
+          checkForwardTransition(sched, nurse.idx, d, req.fallbackWtype, prevHist, totalDays);
+        if (fbOk) sched[nurse.idx][d] = req.fallbackWtype;
+      }
+      processed.add(i);
+      return;
+    }
+
+    if (isWork(wtype)) {
+      const dayCount = countGeneralStaff(sched, nurses, d);
+      if ((dayCount[wtype] || 0) >= RULES.MAX_STAFF[wtype]) {
+        if (req.fallbackWtype) {
+          const fbOk =
+            checkTransition(sched, nurse.idx, d, req.fallbackWtype, prevHist, totalDays) &&
+            checkForwardTransition(sched, nurse.idx, d, req.fallbackWtype, prevHist, totalDays);
+          if (fbOk) sched[nurse.idx][d] = req.fallbackWtype;
+        }
+        processed.add(i);
+        return;
+      }
+    }
+
+    const key = `${day}_${req.priority}`;
+    const group = groupMap.get(key) || [];
+    const candidates = group
+      .filter(({ req: r, i: idx }) => !processed.has(idx) && !isAssigned(sched[r.nurse.idx][r.day - 1]))
+      .map(({ req: r, i: idx }) => ({ req: r, i: idx }));
+
+    if (candidates.length <= 1) {
+      sched[nurse.idx][d] = wtype;
+      processed.add(i);
+      _pullPreceptorToMatch(nurse, d, wtype, sched, nurses, newToPreceptor, prevHist, totalDays, year, month);
+    } else {
+      const winner = resolveConflict(candidates.map(c => c.req));
+      if (winner === null) {
+        candidates.forEach(({ req: r, i: idx }) => { processed.add(idx); tieQueue.push(r); });
+      } else {
+        sched[winner.nurse.idx][winner.day - 1] = winner.wtype;
+        candidates.forEach(({ i: idx }) => processed.add(idx));
+        _pullPreceptorToMatch(winner.nurse, winner.day - 1, winner.wtype, sched, nurses, newToPreceptor, prevHist, totalDays, year, month);
+      }
+    }
+  }
+
+  orderedReqs.forEach(({ req, i }) => processReq(req, i));
+
+  tieQueue.forEach(req => {
+    const d = req.day - 1;
+    if (!isAssigned(sched[req.nurse.idx][d])) {
+      if (isWork(req.wtype)) {
+        const dayCounts = countGeneralStaff(sched, nurses, d);
+        if ((dayCounts[req.wtype] || 0) >= RULES.MAX_STAFF[req.wtype]) return;
+      }
+      const ok =
+        checkTransition(sched, req.nurse.idx, d, req.wtype, prevHist, totalDays) &&
+        checkForwardTransition(sched, req.nurse.idx, d, req.wtype, prevHist, totalDays);
+      if (ok) sched[req.nurse.idx][d] = req.wtype;
+    }
+  });
+}
+
+function resolveConflict(candidates) {
+  const minW = Math.min(...candidates.map(c => c.nurse.monthWanted));
+  let pool = candidates.filter(c => c.nurse.monthWanted === minW);
+  if (pool.length === 1) return pool[0];
+  const maxA = Math.max(...pool.map(c => c.nurse.accumOff));
+  pool = pool.filter(c => c.nurse.accumOff === maxA);
+  if (pool.length === 1) return pool[0];
+  return null;
+}
+
+
+/**
+ * step4_WeekendHolidayDuty:
+ *   - 토요일(dow=6) → 일반 간호사 중 1명에게 DUTY.D9 배정
+ *   - 일요일(dow=0) 또는 공휴일 → 일반 간호사 중 1명에게 DUTY.D10 배정
+ *   - 이미 배정된 셀, 고정(locked) 셀, 전환 규칙 위반 대상은 건너뜀
+ */
+function step4_WeekendHolidayDuty(sched, nurses, totalDays, prevHist, year, month, holidays, locked) {
+  const pool = nurses.filter(n =>
+    n.type === NURSE_TYPE.GENERAL
+  );
+
+  for (let d = 0; d < totalDays; d++) {
+    const dow = new Date(year, month - 1, d + 1).getDay();
+    const isHoliday_ = holidays instanceof Set && holidays.has(d + 1);
+
+    let targetDuty = null;
+    if (dow === 6) targetDuty = DUTY.D9;               // 토요일
+    else if (dow === 0 || isHoliday_) targetDuty = DUTY.D10; // 일요일 또는 공휴일
+
+    if (!targetDuty) continue;
+
+    // 이미 배정된 경우 건너뜀
+    if (pool.some(n => sched[n.idx][d] === targetDuty)) continue;
+
+    // 무작위 순서로 적격 간호사 탐색
+    const shuffled = [...pool].sort(() => Math.random() - 0.5);
+    for (const nurse of shuffled) {
+      if (isAssigned(sched[nurse.idx][d])) continue;
+      if (locked[nurse.idx][d]) continue;
+      if (!canAssignWork(sched, nurse.idx, d, targetDuty, prevHist, totalDays, year, month)) continue;
+      sched[nurse.idx][d] = targetDuty;
+      log(`[Step4] ${nurse.name} ${d + 1}일 → ${targetDuty}`);
+      break;
+    }
+  }
+}
+
+
+function step5_NightDedicatedOff(sched, nurses, totalDays) {
+  nurses.filter(n => n.type === NURSE_TYPE.NIGHT).forEach(nurse => {
+    for (let d = 0; d < totalDays; d++) {
+      if (!isAssigned(sched[nurse.idx][d])) sched[nurse.idx][d] = DUTY.OFF;
+    }
+  });
+}
+
+
+function _syncNewNursesInStep6(prec, d, precDuty, sched, nurses, counts,
+                                precToNewMap, prevHist, totalDays, year, month) {
+  const newList = precToNewMap[prec.idx];
+  if (!newList) return;
+
+  for (const newNurse of newList) {
+    if (isAssigned(sched[newNurse.idx][d])) continue;
+
+    if (isWork(precDuty)) {
+      const maxReached = (counts[precDuty] || 0) >= RULES.MAX_STAFF[precDuty];
+      const ok = !maxReached &&
+        canAssignWork(sched, newNurse.idx, d, precDuty, prevHist, totalDays, year, month);
+      if (ok) {
+        sched[newNurse.idx][d] = precDuty;
+        counts[precDuty] = (counts[precDuty] || 0) + 1;
+        log(`[Step6-Sync] ${prec.name} → ${newNurse.name} ${d+1}일 ${precDuty}`);
+      } else {
+        if (canAssignOff(sched, newNurse.idx, d, DUTY.OFF, prevHist, totalDays)) {
+          sched[newNurse.idx][d] = DUTY.OFF;
+          log(`[Step6-Sync-FB] ${newNurse.name} ${d+1}일 오프(근무 배정 불가 fallback)`);
+        }
+      }
+    } else if (isOff(precDuty) || isRecovery(precDuty)) {
+      if (canAssignOff(sched, newNurse.idx, d, DUTY.OFF, prevHist, totalDays)) {
+        sched[newNurse.idx][d] = precDuty; 
+        log(`[Step6-Sync] ${prec.name} → ${newNurse.name} ${d+1}일 ${precDuty}`);
+      }
+    }
+  }
+}
+
+function step6_GeneralDuty(sched, nurses, totalDays, prevHist, year, month, holidays) {
+  const targetNurses = nurses.filter(n =>
+    n.type === NURSE_TYPE.GENERAL || n.type === NURSE_TYPE.NEW
+  );
+
+  const precToNewMap = {};
+  nurses.filter(n => n.type === NURSE_TYPE.NEW && n.preceptor).forEach(n => {
+    const prec = nurses.find(p => p.name === n.preceptor);
+    if (!prec) return;
+    if (!precToNewMap[prec.idx]) precToNewMap[prec.idx] = [];
+    precToNewMap[prec.idx].push(n);
+  });
+  const newIdxSet = new Set(
+    nurses.filter(n => n.type === NURSE_TYPE.NEW && n.preceptor).map(n => n.idx)
+  );
+
+  function getNurseCounts(nurse) {
+    let d_ = 0, e_ = 0, n_ = 0, off_ = 0, special_ = 0;
+    for (let d = 0; d < totalDays; d++) {
+      const v = sched[nurse.idx][d];
+      if (v === DUTY.D) d_++;
+      else if (v === DUTY.E) e_++;
+      else if (isNight(v)) n_++;
+      else if (isOff(v) && !isRecovery(v)) off_++;
+      else if (v === DUTY.D9 || v === DUTY.D10) special_++;  // D 인원 카운트와 무관하게 근무일 산정
+    }
+    return { D: d_, E: e_, N: n_, off: off_, special: special_ };
+  }
+
+  function remainingEmpty(nurse, fromDay) {
+    let cnt = 0;
+    for (let d = fromDay; d < totalDays; d++) {
+      if (!isAssigned(sched[nurse.idx][d])) cnt++;
+    }
+    return cnt;
+  }
+
+  let baseOff = 0;
+  for (let d = 1; d <= totalDays; d++) {
+    if (isWeekendOrHoliday(year, month, d, holidays)) baseOff++;
+  }
+  const targetOff = Math.min(RULES.OFF_MAX, Math.max(RULES.OFF_MIN, baseOff));
+
+  function getTargets(nurse) {
+    const fixed = getNurseCounts(nurse);
+    const totalWork  = totalDays - targetOff;
+    const remainWork = Math.max(0, totalWork - fixed.D - fixed.E - fixed.N - fixed.special);  // 9/10도 근무일 차감
+    const remainOff  = Math.max(0, targetOff - fixed.off);
+    const each = Math.floor(remainWork / 2);
+    return { D: each, E: remainWork - each, off: remainOff };
+  }
+
+  for (let d = 0; d < totalDays; d++) {
+    const counts = countGeneralStaff(sched, nurses, d);
+
+    const shuffled = [...targetNurses].sort((a, b) => {
+      const ca = getNurseCounts(a), cb = getNurseCounts(b);
+      const offLeftA = (targetOff - ca.off) - remainingEmpty(a, d);
+      const offLeftB = (targetOff - cb.off) - remainingEmpty(b, d);
+      return offLeftA - offLeftB;
+    });
+
+    // [팀 커버리지 패스] 각 팀에 D, E 최소 1명 배정 보장
+    const teams = getTeams(nurses);
+    for (const team of teams) {
+      for (const duty of [DUTY.D, DUTY.E]) {
+        const tc = countTeamStaff(sched, nurses, team, d);
+        if (tc[duty] > 0) continue; // 이미 커버됨
+
+        const teamNurses = shuffled.filter(n =>
+          n.team === team && !newIdxSet.has(n.idx)
+        );
+        for (const nurse of teamNurses) {
+          if (isAssigned(sched[nurse.idx][d])) continue;
+          if ((counts[duty] || 0) >= RULES.MAX_STAFF[duty]) break;
+          if (!canAssignWork(sched, nurse.idx, d, duty, prevHist, totalDays, year, month)) continue;
+          sched[nurse.idx][d] = duty;
+          counts[duty]++;
+          _syncNewNursesInStep6(nurse, d, duty, sched, nurses, counts,
+                                precToNewMap, prevHist, totalDays, year, month);
+          break;
+        }
+      }
+    }
+
+    for (const nurse of shuffled) {
+      if (isAssigned(sched[nurse.idx][d])) continue;
+      if (newIdxSet.has(nurse.idx)) continue;
+
+      const nc      = getNurseCounts(nurse);
+      const targets = getTargets(nurse);
+
+      const shortage = [DUTY.D, DUTY.E].filter(s =>
+        (counts[s] || 0) < RULES.MIN_STAFF[s] &&
+        (counts[s] || 0) < RULES.MAX_STAFF[s]
+      );
+      if (shortage.length === 0) continue;
+
+      const options = shortage.filter(duty =>
+        canAssignWork(sched, nurse.idx, d, duty, prevHist, totalDays, year, month)
+      );
+      if (options.length === 0) continue;
+
+      options.sort((a, b) => {
+        const needA = Math.max(0, RULES.MIN_STAFF[a] - (counts[a] || 0));
+        const needB = Math.max(0, RULES.MIN_STAFF[b] - (counts[b] || 0));
+        if (needB !== needA) return needB - needA;
+        return (targets[b] - nc[b]) - (targets[a] - nc[a]);
+      });
+
+      sched[nurse.idx][d] = options[0];
+      counts[options[0]]++;
+
+      _syncNewNursesInStep6(nurse, d, options[0], sched, nurses, counts,
+                            precToNewMap, prevHist, totalDays, year, month);
+    }
+
+    for (const nurse of shuffled) {
+      if (isAssigned(sched[nurse.idx][d])) continue;
+      if (newIdxSet.has(nurse.idx)) continue;
+
+      const nc      = getNurseCounts(nurse);
+      const targets = getTargets(nurse);
+      const remDays = remainingEmpty(nurse, d + 1);
+
+      const offNeeded = Math.max(0, targetOff - nc.off);
+      const mustOff   = offNeeded > 0 && offNeeded >= remDays + 1;
+      const offFull   = nc.off >= RULES.OFF_MAX;
+
+      if (mustOff && canAssignOff(sched, nurse.idx, d, DUTY.OFF, prevHist, totalDays)) {
+        sched[nurse.idx][d] = DUTY.OFF;
+        continue;
+      }
+
+      const dutyPool   = [DUTY.D, DUTY.E];
+      const workOptions = dutyPool.filter(duty =>
+        (counts[duty] || 0) < RULES.MAX_STAFF[duty] &&
+        canAssignWork(sched, nurse.idx, d, duty, prevHist, totalDays, year, month)
+      );
+
+      const canOff_ = !offFull && canAssignOff(sched, nurse.idx, d, DUTY.OFF, prevHist, totalDays);
+
+      if (workOptions.length === 0) {
+        sched[nurse.idx][d] = DUTY.OFF;
+        continue;
+      }
+
+      const allMet = [DUTY.D, DUTY.E].every(s => (counts[s] || 0) >= RULES.MIN_STAFF[s]);
+      if (allMet && canOff_ && nc.off < targetOff) {
+        sched[nurse.idx][d] = DUTY.OFF;
+        continue;
+      }
+
+      workOptions.sort((a, b) => {
+        const tgtA = targets[a] - nc[a], tgtB = targets[b] - nc[b];
+        if (tgtB !== tgtA) return tgtB - tgtA;
+        return Math.max(0, RULES.MIN_STAFF[b] - (counts[b] || 0)) -
+               Math.max(0, RULES.MIN_STAFF[a] - (counts[a] || 0));
+      });
+
+      const chosen = workOptions[0];
+      sched[nurse.idx][d] = chosen;
+      if (counts[chosen] !== undefined) counts[chosen]++;
+
+      _syncNewNursesInStep6(nurse, d, chosen, sched, nurses, counts,
+                            precToNewMap, prevHist, totalDays, year, month);
+    }
+
+    for (const nurse of shuffled) {
+      if (!newIdxSet.has(nurse.idx)) continue;
+      if (isAssigned(sched[nurse.idx][d])) continue;
+      const prec = nurses.find(p => precToNewMap[p.idx] && precToNewMap[p.idx].some(n => n.idx === nurse.idx));
+      if (!prec || !isAssigned(sched[prec.idx][d])) {
+        if (canAssignOff(sched, nurse.idx, d, DUTY.OFF, prevHist, totalDays))
+          sched[nurse.idx][d] = DUTY.OFF;
+      } else {
+        _syncNewNursesInStep6(prec, d, sched[prec.idx][d], sched, nurses, counts,
+                              precToNewMap, prevHist, totalDays, year, month);
+      }
+    }
+  }
+}
+
+function enforceOffMax(sched, nurses, totalDays, prevHist, year, month, locked) {
+  const targets = nurses.filter(n =>
+    n.type === NURSE_TYPE.GENERAL || n.type === NURSE_TYPE.NEW
+  );
+
+  targets.forEach(nurse => {
+    const plainOffCount = () =>
+      sched[nurse.idx].filter(v => isOff(v) && !isRecovery(v)).length;
+
+    if (plainOffCount() <= RULES.OFF_MAX) return;
+
+    for (let d = 0; d < totalDays && plainOffCount() > RULES.OFF_MAX; d++) {
+      if (sched[nurse.idx][d] !== DUTY.OFF) continue; 
+      // [핵심 보호] 사용자가 고정한 순수 오프(/)는 빼앗지 않는다.
+      if (locked[nurse.idx][d]) continue;
+
+      const counts = countGeneralStaff(sched, nurses, d);
+      const workOk = [DUTY.D, DUTY.E].find(duty =>
+        (counts[duty] || 0) < RULES.MAX_STAFF[duty] &&
+        canAssignWork(sched, nurse.idx, d, duty, prevHist, totalDays, year, month)
+      );
+      if (!workOk) continue;
+
+      sched[nurse.idx][d] = workOk;
+      log(`[OffMax] ${nurse.name} ${d+1}일 오프→${workOk} (OFF_MAX 초과 교정)`);
+    }
+
+    if (plainOffCount() > RULES.OFF_MAX) {
+      log(`[OffMax] ⚠️ ${nurse.name} 오프 ${plainOffCount()}개 — OFF_MAX(${RULES.OFF_MAX}) 초과 유지 (N전환규칙 등으로 교정 불가)`);
+    }
+  });
+}
+
+function step7_PreceptorMatch(sched, nurses, totalDays, prevHist, year, month, holidays, locked) {
+  const newNurses = nurses.filter(n => n.type === NURSE_TYPE.NEW && n.preceptor);
+
+  newNurses.forEach(newNurse => {
+    const preceptor = nurses.find(n => n.name === newNurse.preceptor);
+    if (!preceptor) return;
+
+    for (let d = 0; d < totalDays; d++) {
+      const newCur   = sched[newNurse.idx][d];
+      const precDuty = sched[preceptor.idx][d];
+      if (!isAssigned(precDuty)) continue;
+
+      const newIsOff  = isOff(newCur) || isRecovery(newCur);
+      const precIsOff = isOff(precDuty) || isRecovery(precDuty);
+      if (newCur === precDuty) continue;
+      if (newIsOff && precIsOff) continue;
+
+      const oldVal = sched[newNurse.idx][d];
+
+      if (isAssigned(oldVal)) {
+        // [핵심 보호] 신규 간호사라도 사용자가 직접 D, E, 오프 등을 고정해 뒀다면 변경 불가!
+        if (locked[newNurse.idx][d]) continue;
+
+        if (isOff(oldVal) && oldVal !== DUTY.OFF) continue;
+        if (isNight(oldVal) || isRecovery(oldVal))  continue;
+        if (oldVal === DUTY.EDU || oldVal === DUTY.EDU_R) continue;
+      }
+
+      if (precIsOff) {
+        if (canAssignOff(sched, newNurse.idx, d, DUTY.OFF, prevHist, totalDays)) {
+          sched[newNurse.idx][d] = precDuty; 
+          log(`[Step7] 불일치 교정: ${newNurse.name} ${d+1}일 ${oldVal}→${precDuty} (${preceptor.name} 쉬는날)`);
+        }
+        continue;
+      }
+
+      if (isWork(precDuty)) {
+        const counts = countGeneralStaff(sched, nurses, d);
+        if ((counts[precDuty] || 0) >= RULES.MAX_STAFF[precDuty]) {
+          if (!isAssigned(sched[newNurse.idx][d]) &&
+              canAssignOff(sched, newNurse.idx, d, DUTY.OFF, prevHist, totalDays)) {
+            sched[newNurse.idx][d] = DUTY.OFF;
+          }
+          continue;
+        }
+        const ok = canAssignWork(sched, newNurse.idx, d, precDuty, prevHist, totalDays, year, month);
+        if (ok) {
+          sched[newNurse.idx][d] = precDuty;
+          log(`[Step7] 불일치 교정: ${newNurse.name} ${d+1}일 ${oldVal}→${precDuty} (${preceptor.name} 따라감)`);
+        } else if (!isAssigned(sched[newNurse.idx][d]) &&
+                   canAssignOff(sched, newNurse.idx, d, DUTY.OFF, prevHist, totalDays)) {
+          sched[newNurse.idx][d] = DUTY.OFF;
+        }
+      }
+    }
+  });
+
+  newNurses.forEach(newNurse => {
+    for (let d = 0; d < totalDays; d++) {
+      if (!isAssigned(sched[newNurse.idx][d])) {
+        const offCount = sched[newNurse.idx].filter(v => isOff(v) && !isRecovery(v)).length;
+        if (offCount < RULES.OFF_MAX) {
+          sched[newNurse.idx][d] = DUTY.OFF;
+          log(`[Step7-Safety] ${newNurse.name} ${d+1}일 미배정 → 오프 강제`);
+        } else {
+          const prec = nurses.find(p => p.name === newNurse.preceptor);
+          const precDuty = prec ? sched[prec.idx][d] : null;
+          const fallback = (precDuty && isWork(precDuty)) ? precDuty : DUTY.D;
+          const cnt = countGeneralStaff(sched, nurses, d);
+          if ((cnt[fallback] || 0) < RULES.MAX_STAFF[fallback] &&
+              canAssignWork(sched, newNurse.idx, d, fallback, prevHist, totalDays, year, month)) {
+            sched[newNurse.idx][d] = fallback;
+          } else {
+            sched[newNurse.idx][d] = DUTY.OFF;
+          }
+        }
+      }
+    }
+  });
+}
+
+
+function step8_RepairViolations(sched, nurses, totalDays, prevHist, wanted, year, month, locked, holidays) {
+
+  const wantedSet = new Set();
+  if (wanted) {
+    wanted.forEach(req => {
+      const cur = sched[req.nurse.idx][req.day - 1] || '';
+      if (cur === req.wtype || (req.fallbackWtype && cur === req.fallbackWtype)) {
+        wantedSet.add(`${req.nurse.idx}_${req.day - 1}`);
+      }
+    });
+  }
+  const isWantedCell = (nurseIdx, d) => wantedSet.has(`${nurseIdx}_${d}`);
+
+  const precNewIdxSet = new Set();
+  nurses.filter(n => n.type === NURSE_TYPE.NEW && n.preceptor).forEach(n => {
+    precNewIdxSet.add(n.idx);
+    const prec = nurses.find(p => p.name === n.preceptor);
+    if (prec) precNewIdxSet.add(prec.idx);
+  });
+
+  const repairTargets = nurses.filter(n => !FIXED_AUTO_TYPES.has(n.type));
+
+  function isCellFixed(nurseIdx, d, duty) {
+    if (d >= 0 && d < totalDays && locked[nurseIdx][d]) return true; 
+    if (d < 0) return true; 
+    
+    if (isNight(duty) || duty === DUTY.N_FULL) return true;
+    if (isOff(duty) && duty !== DUTY.OFF) return true; 
+    if (isRecovery(duty)) return true;
+    if (duty === DUTY.EDU || duty === DUTY.EDU_R) return true;
+    return false;
+  }
+
+  function collectViolations() {
+    const viols = [];
+
+    repairTargets.forEach(nurse => {
+      for (let d = 0; d < totalDays; d++) {
+        const curRaw = sched[nurse.idx][d];
+        if (!isAssigned(curRaw)) continue;
+        const cur   = curRaw;
+        const prev1 = getSlot(sched, nurse.idx, d - 1, prevHist, totalDays);
+        const prev2 = getSlot(sched, nurse.idx, d - 2, prevHist, totalDays);
+
+        if (cur === DUTY.D && prev1 === DUTY.E)                                       viols.push({ nurse, d, type: 'E→D' });
+        if (cur === DUTY.E && isNight(prev1))                                         viols.push({ nurse, d, type: 'N→E' });
+        if (cur === DUTY.D && isNight(prev1))                                         viols.push({ nurse, d, type: 'N→D' });
+        if (cur === DUTY.D && (isOff(prev1) || isRecovery(prev1)) && isNight(prev2)) viols.push({ nurse, d, type: 'N→/→D' });
+        if (cur === DUTY.EDU_R && prev1 === DUTY.E)                                   viols.push({ nurse, d, type: 'E→필교' });
+        if (cur === DUTY.EDU_R && isNight(prev1))                                     viols.push({ nurse, d, type: 'N→필교' });
+        // 9/10 전환 금지 규칙
+        if ((cur === DUTY.D9 || cur === DUTY.D10) && isNight(prev1))                  viols.push({ nurse, d, type: `N→${cur}` });
+        if ((cur === DUTY.D9 || cur === DUTY.D10) && prev1 === DUTY.E)                viols.push({ nurse, d, type: `E→${cur}` });
+        if ((cur === DUTY.D9 || cur === DUTY.D10) && (isOff(prev1) || isRecovery(prev1)) && isNight(prev2)) viols.push({ nurse, d, type: `N→/→${cur}` });
+        if (cur === DUTY.D && (prev1 === DUTY.D9 || prev1 === DUTY.D10))              viols.push({ nurse, d, type: '9/10→D' });
+
+        if (isWork(cur)) {
+          let consec = 1;
+          for (let i = d - 1; i >= 0; i--) {
+            if (isWork(getSlot(sched, nurse.idx, i, prevHist, totalDays))) consec++;
+            else break;
+          }
+          if (consec > RULES.MAX_CONSEC_WORK) viols.push({ nurse, d, type: 'CONSEC' });
+        }
+      }
+    });
+
+    for (let d = 0; d < totalDays; d++) {
+      const counts = countGeneralStaff(sched, nurses, d);
+      [DUTY.D, DUTY.E, DUTY.N].forEach(s => {
+        const n = counts[s] || 0;
+        if (n < RULES.MIN_STAFF[s]) viols.push({ nurse: null, d, type: `UNDER_${s}`, duty: s, count: n });
+        if (n > RULES.MAX_STAFF[s]) viols.push({ nurse: null, d, type: `OVER_${s}`,  duty: s, count: n });
+      });
+      // 팀별 D/E 최소 배정 위반 감지
+      const teams_ = getTeams(nurses);
+      for (const team of teams_) {
+        const tc = countTeamStaff(sched, nurses, team, d);
+        if (tc.D === 0) viols.push({ nurse: null, d, type: `TEAM_UNDER_D_${team}`, duty: DUTY.D, team });
+        if (tc.E === 0) viols.push({ nurse: null, d, type: `TEAM_UNDER_E_${team}`, duty: DUTY.E, team });
+      }
+    }
+
+    // D9/D10 인원 위반 감지 (holidays 제공 시) — 일반 간호사만 대상
+    if (holidays) {
+      const allTargets = nurses.filter(n =>
+        n.type === NURSE_TYPE.GENERAL
+      );
+      for (let d = 0; d < totalDays; d++) {
+        const dow = new Date(year, month - 1, d + 1).getDay();
+        const isHoliday_ = holidays instanceof Set && holidays.has(d + 1);
+        if (dow === 6) {
+          const cnt9 = allTargets.filter(n => sched[n.idx][d] === DUTY.D9).length;
+          if (cnt9 < 1) viols.push({ nurse: null, d, type: 'UNDER_9',  duty: DUTY.D9 });
+          if (cnt9 > 1) viols.push({ nurse: null, d, type: 'OVER_9',   duty: DUTY.D9 });
+        }
+        if (dow === 0 || isHoliday_) {
+          const cnt10 = allTargets.filter(n => sched[n.idx][d] === DUTY.D10).length;
+          if (cnt10 < 1) viols.push({ nurse: null, d, type: 'UNDER_10', duty: DUTY.D10 });
+          if (cnt10 > 1) viols.push({ nurse: null, d, type: 'OVER_10',  duty: DUTY.D10 });
+        }
+      }
+    }
+
+    return viols;
+  }
+
+  function compensate(day, duty) {
+    const dayCounts = countGeneralStaff(sched, nurses, day);
+    if ((dayCounts[duty] || 0) >= RULES.MAX_STAFF[duty]) return false;
+    for (const nurse of repairTargets) {
+      const cur = sched[nurse.idx][day];
+      if (cur && cur !== DUTY.OFF) continue;
+      
+      if (locked[nurse.idx][day]) continue; 
+      
+      if (precNewIdxSet.has(nurse.idx)) continue;
+      if (!canAssignWork(sched, nurse.idx, day, duty, prevHist, totalDays, year, month)) continue;
+      
+      const offCount = sched[nurse.idx].filter(v => isOff(v) && !isRecovery(v)).length;
+      if (offCount >= RULES.OFF_MAX) continue;
+
+      const updatedCounts = countGeneralStaff(sched, nurses, day);
+      if ((updatedCounts[duty] || 0) >= RULES.MAX_STAFF[duty]) return false;
+      sched[nurse.idx][day] = duty;
+      return true;
+    }
+    return false;
+  }
+
+  function compensateTeam(day, duty, team) {
+    const dayCounts = countGeneralStaff(sched, nurses, day);
+    if ((dayCounts[duty] || 0) >= RULES.MAX_STAFF[duty]) return false;
+    const teamNurses = repairTargets.filter(n =>
+      n.team === team && (n.type === NURSE_TYPE.GENERAL || n.type === NURSE_TYPE.NEW)
+    );
+    for (const nurse of teamNurses) {
+      const cur = sched[nurse.idx][day];
+      if (cur && cur !== DUTY.OFF) continue;
+      if (locked[nurse.idx][day]) continue;
+      if (precNewIdxSet.has(nurse.idx)) continue;
+      if (!canAssignWork(sched, nurse.idx, day, duty, prevHist, totalDays, year, month)) continue;
+      const offCount = sched[nurse.idx].filter(v => isOff(v) && !isRecovery(v)).length;
+      if (offCount >= RULES.OFF_MAX) continue;
+      sched[nurse.idx][day] = duty;
+      return true;
+    }
+    return false;
+  }
+
+  function getCandidates(viol) {
+    const { nurse, d, type } = viol;
+    const prev1 = getSlot(sched, nurse.idx, d - 1, prevHist, totalDays);
+    const cands = [];
+
+    if (type === 'E→D') {
+      if (!isCellFixed(nurse.idx, d - 1, prev1)) cands.push({ nurse, d: d - 1, was: prev1 });
+      if (!isCellFixed(nurse.idx, d, sched[nurse.idx][d])) cands.push({ nurse, d, was: sched[nurse.idx][d] });
+    } else if (type === 'N→E' || type === 'N→D') {
+      if (!isCellFixed(nurse.idx, d, sched[nurse.idx][d])) cands.push({ nurse, d, was: sched[nurse.idx][d] });
+    } else if (type === 'N→/→D') {
+      if (!isCellFixed(nurse.idx, d, sched[nurse.idx][d])) cands.push({ nurse, d, was: sched[nurse.idx][d] });
+      if (!isCellFixed(nurse.idx, d - 1, prev1)) cands.push({ nurse, d: d - 1, was: prev1 });
+    } else if (type === 'E→필교' || type === 'N→필교') {
+      if (!isCellFixed(nurse.idx, d - 1, prev1)) cands.push({ nurse, d: d - 1, was: prev1 });
+      if (!isCellFixed(nurse.idx, d, sched[nurse.idx][d])) cands.push({ nurse, d, was: sched[nurse.idx][d] });
+    } else if (type.startsWith('N→') && (type.endsWith('9') || type.endsWith('10'))) {
+      // N→9, N→10: 해당 9/10 셀을 교체 대상으로
+      if (!isCellFixed(nurse.idx, d, sched[nurse.idx][d])) cands.push({ nurse, d, was: sched[nurse.idx][d] });
+    } else if (type.startsWith('E→') && (type.endsWith('9') || type.endsWith('10'))) {
+      // E→9, E→10: 전일 E 또는 해당 9/10 셀 교체
+      if (!isCellFixed(nurse.idx, d - 1, prev1)) cands.push({ nurse, d: d - 1, was: prev1 });
+      if (!isCellFixed(nurse.idx, d, sched[nurse.idx][d])) cands.push({ nurse, d, was: sched[nurse.idx][d] });
+    } else if (type.startsWith('N→/→') && (type.endsWith('9') || type.endsWith('10'))) {
+      // N→/→9, N→/→10: 해당 9/10 셀 또는 중간 오프 셀 교체
+      if (!isCellFixed(nurse.idx, d, sched[nurse.idx][d])) cands.push({ nurse, d, was: sched[nurse.idx][d] });
+      if (!isCellFixed(nurse.idx, d - 1, prev1)) cands.push({ nurse, d: d - 1, was: prev1 });
+    } else if (type === '9/10→D') {
+      // 9/10 다음날 D: 해당 D 셀을 교체
+      if (!isCellFixed(nurse.idx, d, sched[nurse.idx][d])) cands.push({ nurse, d, was: sched[nurse.idx][d] });
+    } else if (type === 'CONSEC') {
+      let start = d;
+      while (start > 0 && isWork(getSlot(sched, nurse.idx, start - 1, prevHist, totalDays))) start--;
+      const mid = Math.floor((start + d) / 2);
+      for (let offset = 0; offset <= d - start; offset++) {
+        const fw = mid + offset, bw = mid - offset;
+        if (fw <= d && !isCellFixed(nurse.idx, fw, sched[nurse.idx][fw])) cands.push({ nurse, d: fw, was: sched[nurse.idx][fw] });
+        if (bw >= start && bw !== fw && !isCellFixed(nurse.idx, bw, sched[nurse.idx][bw])) cands.push({ nurse, d: bw, was: sched[nurse.idx][bw] });
+      }
+    }
+    cands.sort((a, b) => {
+      const aW = isWantedCell(a.nurse.idx, a.d) ? 1 : 0;
+      const bW = isWantedCell(b.nurse.idx, b.d) ? 1 : 0;
+      return aW - bW;
+    });
+    return cands;
+  }
+
+  const MAX_ITER = 150;
+  let iter = 0, totalFixed = 0;
+
+  while (iter < MAX_ITER) {
+    iter++;
+    const viols = collectViolations();
+    if (viols.length === 0) break;
+
+    const viol = viols[0];
+
+    if (viol.type && viol.type.startsWith('OVER_')) {
+      const { d, duty } = viol;
+      const overCands = repairTargets
+        .filter(n => sched[n.idx][d] === duty && !isCellFixed(n.idx, d, sched[n.idx][d]))
+        .sort((a, b) => {
+          const aW = isWantedCell(a.idx, d) ? 1 : 0;
+          const bW = isWantedCell(b.idx, d) ? 1 : 0;
+          return aW - bW; 
+        });
+      let removed = false;
+      for (const nurse of overCands) {
+        const offCnt = sched[nurse.idx].filter(v => isOff(v) && !isRecovery(v)).length;
+        if (offCnt >= RULES.OFF_MAX) continue;
+        sched[nurse.idx][d] = DUTY.OFF;
+        totalFixed++;
+        removed = true;
+        if (isWantedCell(nurse.idx, d)) log(`[Repair-OVER] Wanted 셀 부득이 제거: ${nurse.name} ${d+1}일 ${duty}`);
+        break;
+      }
+      if (!removed) iter = MAX_ITER;
+      continue;
+    }
+
+    if (viol.type && viol.type.startsWith('UNDER_')) {
+      const { d, duty } = viol;
+      if (!compensate(d, duty)) iter = MAX_ITER;
+      else totalFixed++;
+      continue;
+    }
+
+    if (viol.type && viol.type.startsWith('TEAM_UNDER_')) {
+      const { d, duty, team } = viol;
+      if (!compensateTeam(d, duty, team)) iter = MAX_ITER;
+      else totalFixed++;
+      continue;
+    }
+
+    const cands = getCandidates(viol);
+    let fixed = false;
+    for (const cand of cands) {
+      const { nurse, d, was } = cand;
+      const offCntCand = sched[nurse.idx].filter(v => isOff(v) && !isRecovery(v)).length;
+      if (offCntCand >= RULES.OFF_MAX) continue;
+      sched[nurse.idx][d] = DUTY.OFF;
+      let sideEffect = false;
+      if (isWork(was)) {
+        const counts = countGeneralStaff(sched, nurses, d);
+        [DUTY.D, DUTY.E, DUTY.N].forEach(s => {
+          if ((counts[s] || 0) < RULES.MIN_STAFF[s]) {
+            if (!compensate(d, s)) sideEffect = true;
+          }
+        });
+      }
+      const newViols = collectViolations();
+      if (newViols.length >= viols.length && sideEffect) {
+        sched[nurse.idx][d] = was;
+        continue;
+      }
+      totalFixed++;
+      fixed = true;
+      break;
+    }
+
+    if (!fixed) {
+      const { nurse, d } = viol;
+      if (nurse && !isCellFixed(nurse.idx, d, sched[nurse.idx][d]) && !isWantedCell(nurse.idx, d)) {
+        const offCntLast = sched[nurse.idx].filter(v => isOff(v) && !isRecovery(v)).length;
+        if (offCntLast < RULES.OFF_MAX) {
+          sched[nurse.idx][d] = DUTY.OFF;
+          totalFixed++;
+        }
+      } else if (nurse && !isCellFixed(nurse.idx, d, sched[nurse.idx][d]) && isWantedCell(nurse.idx, d)) {
+        const offCntLast = sched[nurse.idx].filter(v => isOff(v) && !isRecovery(v)).length;
+        if (offCntLast < RULES.OFF_MAX) {
+          log(`[Repair-Last] Wanted 셀 강제 제거: ${nurse.name} ${d+1}일`);
+          sched[nurse.idx][d] = DUTY.OFF;
+          totalFixed++;
+        }
+      } else {
+        break;
+      }
+    }
+  }
+
+  if (totalFixed > 0) log(`[Repair] ${iter}회 반복, ${totalFixed}개 셀 수정`);
+  if (iter >= MAX_ITER) log(`[Repair] 최대 반복 도달 — 남은 위반은 수동 조정 필요`);
+}
+
+
+/**
+ * ============================================================
+ * Output.gs — 근무표 출력 및 발행
+ * ============================================================
+ */
+
+function writeOutput(ss, yyyymm, sched, nurses, holidays, year, month, totalDays, wanted) {
+  const sheetName = SHEET.OUTPUT_PREFIX + yyyymm;
+  const out       = recreateSheet(ss, sheetName);
+
+  const DOW_LABELS = ['일', '월', '화', '수', '목', '금', '토'];
+  const DATE_COL   = 4;                         
+  const STAT_START = DATE_COL + totalDays;      
+
+  const header = ['성명', '전달\n잔여', '이번달\n잔여'];
+  for (let d = 1; d <= totalDays; d++) {
+    const dow = getDayOfWeek(year, month, d);
+    header.push(`${d}\n${DOW_LABELS[dow]}`);
+  }
+  header.push('D', 'E', 'N', '/', '미반영\nWanted', 'Wanted\n신청내역');
+  out.appendRow(header);
+
+  let lastTeam = '';
+  const nurseRows = [];
+
+  nurses.forEach(nurse => {
+    if (nurse.team && nurse.team !== lastTeam && !FIXED_AUTO_TYPES.has(nurse.type)) {
+      out.appendRow([`${nurse.team}팀`, ...new Array(totalDays + 7).fill('')]);
+      lastTeam = nurse.team;
+    }
+
+    const curRow = out.getLastRow() + 1;
+    const row = [nurse.name, nurse.accumOff, ''];
+    for (let d = 0; d < totalDays; d++) {
+      row.push(sched[nurse.idx][d] || '');
+    }
+
+    const nurseWanted   = (wanted || []).filter(req => req.nurse.idx === nurse.idx);
+    const unmetCount    = nurseWanted.filter(req => {
+      const raw = sched[nurse.idx][req.day - 1] || '';
+      return raw !== req.wtype && !(req.fallbackWtype && raw === req.fallbackWtype);
+    }).length;
+    const unmetDisplay  = nurseWanted.length > 0 ? unmetCount : '';
+    const wantedSummary = nurseWanted.length > 0
+      ? nurseWanted.map(r => r.fallbackWtype ? `${r.day}(${r.wtype} or ${r.fallbackWtype})` : `${r.day}(${r.wtype})`).join(', ') : '';
+
+    row.push('', '', '', '', unmetDisplay, wantedSummary);
+    out.appendRow(row);
+    nurseRows.push({ sheetRow: out.getLastRow(), nurse, isFixed: FIXED_AUTO_TYPES.has(nurse.type) });
+  });
+
+  _appendDailyCountRowFormula(out, nurses, totalDays, nurseRows);
+
+  const dayStartCol = colToLetter(DATE_COL);
+  const dayEndCol   = colToLetter(DATE_COL + totalDays - 1);
+  const statD = colToLetter(STAT_START);
+  const statE = colToLetter(STAT_START + 1);
+  const statN = colToLetter(STAT_START + 2);
+  const statO = colToLetter(STAT_START + 3);
+
+  let baseOff = 0;
+  for (let d = 1; d <= totalDays; d++) {
+    if (isWeekendOrHoliday(year, month, d, holidays)) baseOff++;
+  }
+
+  nurseRows.forEach(({ sheetRow, nurse, isFixed }) => {
+    const r = sheetRow;
+    const rangeRef = `${dayStartCol}${r}:${dayEndCol}${r}`;
+
+    out.getRange(r, STAT_START    ).setFormula(`=COUNTIF(${rangeRef},"D")`);
+    out.getRange(r, STAT_START + 1).setFormula(`=COUNTIF(${rangeRef},"E")`);
+    out.getRange(r, STAT_START + 2).setFormula(`=COUNTIF(${rangeRef},"N")+COUNTIF(${rangeRef},"N전")`);
+    out.getRange(r, STAT_START + 3).setFormula(`=COUNTIF(${rangeRef},"/")`);
+
+    {
+      const bCol  = colToLetter(2);
+      const nCell = `${statN}${r}`;
+      if (nurse.type === NURSE_TYPE.NIGHT) {
+        const target = RULES.NIGHT_TARGET[nurse.gender] || 14;
+        out.getRange(r, 3).setFormula(`=${bCol}${r}+(${nCell}-${target})`);
+      } else {
+        out.getRange(r, 3).setFormula(`=${bCol}${r}+${baseOff}-${statO}${r}`);
+      }
+    }
+  });
+
+  _applyStylesOutput(out, nurses, nurseRows, totalDays, year, month, holidays);
+
+  return out;
+}
+
+function _appendDailyCountRow(out, nurses, sched, totalDays) {}
+
+function _appendDailyCountRowFormula(out, nurses, totalDays, nurseRows) {
+  const DATE_COL  = 4;   
+  const totalCols = 3 + totalDays + 6; 
+
+  const targetRows = nurseRows
+    .filter(r => !r.isFixed)
+    .map(r => r.sheetRow);
+
+  if (targetRows.length === 0) return;
+
+  out.appendRow(['D 인원', '', '', ...new Array(totalDays + 6).fill('')]);
+  out.appendRow(['E 인원', '', '', ...new Array(totalDays + 6).fill('')]);
+  out.appendRow(['N 인원', '', '', ...new Array(totalDays + 6).fill('')]);
+
+  const lastRow = out.getLastRow();
+  const dRow = lastRow - 2;
+  const eRow = lastRow - 1;
+  const nRow = lastRow;
+
+  for (let d = 0; d < totalDays; d++) {
+    const col    = DATE_COL + d;
+    const colLet = colToLetter(col);
+
+    const sumD = targetRows.map(r => `COUNTIF(${colLet}${r},"D")`).join('+');
+    const sumE = targetRows.map(r => `COUNTIF(${colLet}${r},"E")`).join('+');
+    const sumN = targetRows.map(r => `COUNTIF(${colLet}${r},"N")+COUNTIF(${colLet}${r},"N전")`).join('+');
+
+    out.getRange(dRow, col).setFormula(`=${sumD}`);
+    out.getRange(eRow, col).setFormula(`=${sumE}`);
+    out.getRange(nRow, col).setFormula(`=${sumN}`);
+  }
+
+  out.getRange(dRow, 1, 3, totalCols).setFontWeight('bold');
+  out.getRange(dRow, 1, 1, totalCols).setBackground('#D4EDDA');
+  out.getRange(eRow, 1, 1, totalCols).setBackground('#FFF3CD');
+  out.getRange(nRow, 1, 1, totalCols).setBackground('#CCE5FF');
+}
+
+function _applyStylesOutput(out, nurses, nurseRows, totalDays, year, month, holidays) {
+  const totalCols = 3 + totalDays + 6; 
+
+  styleHeader(out.getRange(1, 1, 1, totalCols), '#2C5F8A');
+  out.setFrozenRows(1);
+  out.setFrozenColumns(1);
+
+  for (let d = 1; d <= totalDays; d++) {
+    const col  = d + 3;
+    const cell = out.getRange(1, col);
+    if (isWeekendOrHoliday(year, month, d, holidays)) {
+      cell.setBackground('#555555').setFontColor('#FFFFFF');
+    } else {
+      cell.setBackground('#CCCCCC').setFontColor('#333333');
+    }
+  }
+
+  const sheetData  = out.getDataRange().getValues();
+  for (let i = 1; i < sheetData.length; i++) {
+    const nm = normalize(sheetData[i][0]);
+    if (nm.endsWith('팀')) {
+      out.getRange(i + 1, 1, 1, totalCols).setBackground(null).setFontWeight('bold');
+    }
+  }
+
+  out.setColumnWidth(1, 70);   
+  out.setColumnWidth(2, 45);   
+  out.setColumnWidth(3, 45);   
+  for (let d = 4; d <= 3 + totalDays; d++) out.setColumnWidth(d, 30);           
+  for (let c = 4 + totalDays; c <= totalCols - 1; c++) out.setColumnWidth(c, 45); 
+  out.setColumnWidth(totalCols, 200);  
+}
+
+function _applyStylesResult(result, srcData, nurses, totalDays, year, month, holidays) {
+  const totalCols = 3 + totalDays + 6; 
+  const skipPfx   = ['D 인원', 'E 인원', 'N 인원'];
+
+  styleHeader(result.getRange(1, 1, 1, totalCols), '#2C5F8A');
+  result.setFrozenRows(1);
+  result.setFrozenColumns(1);
+
+  for (let d = 1; d <= totalDays; d++) {
+    const col  = d + 3;
+    const cell = result.getRange(1, col);
+    if (isWeekendOrHoliday(year, month, d, holidays)) {
+      cell.setBackground('#555555').setFontColor('#FFFFFF');
+    } else {
+      cell.setBackground('#CCCCCC').setFontColor('#333333');
+    }
+  }
+
+  const nameToRow = {};
+  for (let i = 1; i < srcData.length; i++) {
+    const nm = normalize(srcData[i][0]);
+    if (!nm || skipPfx.some(p => nm.startsWith(p))) continue;
+    nameToRow[nm] = i + 1;  
+  }
+
+  for (let i = 1; i < srcData.length; i++) {
+    const nm = normalize(srcData[i][0]);
+    if (nm.endsWith('팀')) {
+      result.getRange(i + 1, 1, 1, totalCols).setBackground(null).setFontColor(null).setFontWeight('bold');
+    }
+  }
+
+  nurses.forEach(nurse => {
+    const row = nameToRow[nurse.name];
+    if (!row) return;
+    for (let d = 0; d < totalDays; d++) {
+      const duty  = normalize(srcData[row - 1][3 + d]);
+      const color = DUTY_COLOR[duty] || '#FFFFFF';
+      result.getRange(row, 4 + d).setBackground(color);
+    }
+  });
+
+  result.setColumnWidth(1, 70);   
+  result.setColumnWidth(2, 45);   
+  result.setColumnWidth(3, 45);   
+  for (let d = 4; d <= 3 + totalDays; d++) result.setColumnWidth(d, 30);            
+  for (let c = 4 + totalDays; c <= totalCols - 1; c++) result.setColumnWidth(c, 45); 
+  result.setColumnWidth(totalCols, 200);  
+}
+
+function _applyStyles() {}
+
+function highlightViolations(out, nurses, sched, totalDays, prevHist, year, month, holidays) {
+  const DATE_COL_OFFSET = 3; 
+  const skipPrefixes    = ['D 인원', 'E 인원', 'N 인원'];
+
+  SpreadsheetApp.flush(); 
+
+  const dataRange = out.getDataRange();
+  const sheetData = dataRange.getValues();
+  const bgArray   = dataRange.getBackgrounds();
+  const fcArray   = dataRange.getFontColors();
+  const fwArray   = dataRange.getFontWeights();
+  const totalRows = sheetData.length;
+
+  const nameToRowIdx = {};
+  for (let i = 1; i < totalRows; i++) {
+    const cellName = normalize(sheetData[i][0]);
+    if (!cellName) continue;
+    if (cellName.endsWith('팀')) continue;
+    if (skipPrefixes.some(p => cellName.startsWith(p))) continue;
+    nameToRowIdx[cellName] = i;
+  }
+
+  let violCount = 0;
+
+  nurses.forEach(nurse => {
+    if (FIXED_AUTO_TYPES.has(nurse.type)) return;
+
+    const ri = nameToRowIdx[nurse.name];
+    if (ri === undefined) return;
+
+    let consec = 0;
+
+    for (let d = 0; d < totalDays; d++) {
+      const cur = sched[nurse.idx][d] || '';
+
+      if (!isAssigned(cur)) { consec = 0; continue; }
+
+      let viol = false;
+
+      if (d >= 1) {
+        const prev1 = sched[nurse.idx][d - 1] || '';
+        if (cur === DUTY.D && prev1 === DUTY.E)  viol = true;
+        if (cur === DUTY.E && isNight(prev1))    viol = true;
+        if (cur === DUTY.D && isNight(prev1))    viol = true;
+        if (cur === DUTY.EDU_R && (prev1 === DUTY.E || isNight(prev1))) viol = true;  
+
+        if (d >= 2) {
+          const prev2 = sched[nurse.idx][d - 2] || '';
+          if (cur === DUTY.D && (isOff(prev1) || isRecovery(prev1)) && isNight(prev2)) viol = true;
+        }
+      }
+
+      if (isWork(cur)) {
+        consec++;
+        if (consec > RULES.MAX_CONSEC_WORK) viol = true;
+      } else {
+        consec = 0;
+      }
+
+      if (viol) {
+        const ci = DATE_COL_OFFSET + d; 
+        bgArray[ri][ci] = '#FF4444';
+        fcArray[ri][ci] = '#FFFFFF';
+        fwArray[ri][ci] = 'bold';
+        violCount++;
+      }
+    }
+  });
+
+  const countRowIdx = { D: -1, E: -1, N: -1 };
+  for (let i = 1; i < totalRows; i++) {
+    const n = normalize(sheetData[i][0]);
+    if (n === 'D 인원') countRowIdx[DUTY.D] = i;
+    if (n === 'E 인원') countRowIdx[DUTY.E] = i;
+    if (n === 'N 인원') countRowIdx[DUTY.N] = i;
+  }
+
+  for (let d = 0; d < totalDays; d++) {
+    const counts = countGeneralStaff(sched, nurses, d);
+    [DUTY.D, DUTY.E, DUTY.N].forEach(s => {
+      const n  = counts[s] || 0;
+      const ri = countRowIdx[s];
+      if (ri === -1) return;
+      if (n < RULES.MIN_STAFF[s] || n > RULES.MAX_STAFF[s]) {
+        const ci = DATE_COL_OFFSET + d;
+        bgArray[ri][ci] = '#FF4444';
+        fcArray[ri][ci] = '#FFFFFF';
+        fwArray[ri][ci] = 'bold';
+        violCount++;
+      }
+    });
+  }
+
+  dataRange.setBackgrounds(bgArray);
+  dataRange.setFontColors(fcArray);
+  dataRange.setFontWeights(fwArray);
+
+  log(`[Highlight] 위반 셀 ${violCount}개 표시 완료 (개인 전환/연속 + 인원 범위 포함)`);
+}
+
+function createResultSheet(ss, yyyymm, outSheet, nurses, totalDays) {
+  const year   = parseInt(yyyymm.slice(0, 4), 10);
+  const month  = parseInt(yyyymm.slice(4, 6), 10);
+  const holidays = loadHolidays(ss, year, month);
+
+  const resultName = SHEET.RESULT_PREFIX + yyyymm;
+  const result     = recreateSheet(ss, resultName);
+
+  const srcData = outSheet.getDataRange().getValues();
+  const srcFw   = outSheet.getDataRange().getFontWeights();
+  const totalRows = srcData.length;
+  const totalCols = srcData[0].length;
+
+  result.getRange(1, 1, totalRows, totalCols).setValues(srcData);
+  result.getRange(1, 1, totalRows, totalCols).setFontWeights(srcFw);
+
+  _applyStylesResult(result, srcData, nurses, totalDays, year, month, holidays);
+
+  return resultName;
+}
+
+
+/**
+ * ============================================================
+ * Menu.gs — 메뉴 등록 및 진입점 함수
+ * ============================================================
+ */
+
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('🏥 듀티 자동생성')
+    .addItem('📋 듀티표 생성 준비', 'menuPrepare')
+    .addSeparator()
+    .addItem('▶ 근무표 생성', 'menuGenerateBestOf')
+    .addSeparator()
+    .addItem('✅ 발행', 'menuPublish')
+    .addToUi();
+}
+
+function menuPrepare() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+
+  const yearResp = ui.prompt('📅 근무표 대상 년도 입력', '4자리 년도를 입력하세요. (예: 2025)', ui.ButtonSet.OK_CANCEL);
+  if (yearResp.getSelectedButton() !== ui.Button.OK) { ui.alert('취소했습니다.'); return; }
+  const yearVal = yearResp.getResponseText().trim();
+  if (!/^\d{4}$/.test(yearVal)) { ui.alert('❌ 년도 형식 오류\n4자리 숫자로 입력해 주세요. (예: 2025)'); return; }
+
+  const monthResp = ui.prompt('📅 근무표 대상 월 입력', '월을 입력하세요. (예: 8 또는 08)', ui.ButtonSet.OK_CANCEL);
+  if (monthResp.getSelectedButton() !== ui.Button.OK) { ui.alert('취소했습니다.'); return; }
+  const monthVal = monthResp.getResponseText().trim().padStart(2, '0');
+  if (!/^(0[1-9]|1[0-2])$/.test(monthVal)) { ui.alert('❌ 월 형식 오류\n1~12 사이 숫자로 입력해 주세요.'); return; }
+
+  const yyyymm    = yearVal + monthVal;
+  const year      = parseInt(yearVal, 10);
+  const month     = parseInt(monthVal, 10);
+  const totalDays = getTotalDays(yyyymm);
+
+  const holidaySheet = getOrCreateSheet(ss, SHEET.HOLIDAYS);
+  _buildHolidaySheet(holidaySheet, yyyymm);
+
+  const prevSheet = getOrCreateSheet(ss, SHEET.PREV_SCHED);
+  if (prevSheet.getLastRow() === 0) {
+    prevSheet.getRange('A1').setValue('← 전달 결과표_YYYYMM 시트 내용을 이 시트에 복사-붙여넣기 하세요.');
+    prevSheet.getRange('A1').setFontColor('#888888').setFontStyle('italic');
+  }
+
+  const nurseSheet = getOrCreateSheet(ss, SHEET.NURSES);
+  if (nurseSheet.getLastRow() === 0) {
+    const headers = ['이름', '유형', '성별(여/남)', '팀(A~F)', '프리셉터 이름(신규만)'];
+    nurseSheet.appendRow(headers);
+    styleHeader(nurseSheet.getRange(1, 1, 1, headers.length), '#2C5F8A');
+    nurseSheet.setFrozenRows(1);
+    nurseSheet.getRange('B2:B100').setDataValidation(
+      SpreadsheetApp.newDataValidation()
+        .requireValueInList(['수간호사', 'P-D', 'P-E', '나이트전담', '일반', '신규'])
+        .setAllowInvalid(false).build()
+    );
+    nurseSheet.getRange('C2:C100').setDataValidation(
+      SpreadsheetApp.newDataValidation()
+        .requireValueInList(['여', '남'])
+        .setAllowInvalid(false).build()
+    );
+  }
+
+  const nurses = loadNurses(ss);
+  _refreshFixedSheet(ss, nurses, totalDays);
+
+  const wantedSheet = getOrCreateSheet(ss, SHEET.WANTED);
+  if (wantedSheet.getLastRow() === 0) {
+    const headers = [
+      '이름',
+      '신청1_날짜', '신청1_유형',
+      '신청2_날짜', '신청2_유형',
+      '신청3_날짜', '신청3_유형',
+      '신청4_날짜', '신청4_유형',
+      '신청5_날짜', '신청5_유형',
+    ];
+    wantedSheet.appendRow(headers);
+    styleHeader(wantedSheet.getRange(1, 1, 1, headers.length), '#2E8B57');
+    wantedSheet.setFrozenRows(1);
+    wantedSheet.getRange('A2').setValue('← 간호사 이름과 신청 날짜/유형을 입력하세요.');
+    wantedSheet.getRange('A2').setFontColor('#888888').setFontStyle('italic');
+  }
+
+  ui.alert(
+    `✅ ${year}년 ${month}월 준비 완료!\n\n` +
+    `📌 공휴일 시트: 날짜/요일 갱신 완료\n` +
+    `   → 공휴일 날짜에 체크해 주세요\n\n` +
+    `📋 고정듀티: 날짜 열 재구성 완료\n` +
+    `   → N전, 병, 헌, 돌봄, 분만, 건진 등 입력\n\n` +
+    `📝 Wanted: 신청 내역 입력\n\n` +
+    `🗂️ 전달근무표: 전달 결과표를 붙여넣기\n\n` +
+    `준비 완료 후 [▶ 근무표 생성] 클릭`
+  );
+}
+
+function _buildHolidaySheet(sh, yyyymm) {
+  // 이전 달 데이터가 잔존하지 않도록 시트 전체 초기화
+  sh.clearContents();
+  sh.clearFormats();
+
+  const year      = parseInt(yyyymm.slice(0, 4), 10);
+  const month     = parseInt(yyyymm.slice(4, 6), 10);
+  const totalDays = new Date(year, month, 0).getDate();
+  const DOW_KR    = ['일', '월', '화', '수', '목', '금', '토'];
+
+  sh.getRange('A1').setValue('대상 월').setFontWeight('bold').setFontColor('#888888');
+  sh.getRange('B1').setValue(yyyymm).setBackground('#E8F0FE').setFontWeight('bold');
+
+  sh.getRange('A3').setValue('날짜').setFontWeight('bold');
+  sh.getRange('B3').setValue('요일').setFontWeight('bold');
+  sh.getRange('C3').setValue('공휴일 체크').setFontWeight('bold');
+  styleHeader(sh.getRange('A3:C3'), '#6A5ACD');
+
+  for (let d = 1; d <= 31; d++) {
+    const row = SETTINGS_DAY_START_ROW + d - 1;
+    if (d <= totalDays) {
+      const dow = new Date(year, month - 1, d).getDay();
+      sh.getRange(row, 1).setValue(d);
+      sh.getRange(row, 2).setValue(DOW_KR[dow]);
+      sh.getRange(row, 3).insertCheckboxes();
+      sh.getRange(row, 1, 1, 3).setBackground(null).setFontColor(null);
+    } else {
+      sh.getRange(row, 1).setValue(d);
+      sh.getRange(row, 2).setValue('');
+      sh.getRange(row, 1, 1, 3).setBackground('#EEEEEE').setFontColor('#AAAAAA');
+    }
+  }
+
+  sh.setColumnWidth(1, 60);
+  sh.setColumnWidth(2, 60);
+  sh.setColumnWidth(3, 90);
+}
+
+function _refreshFixedSheet(ss, nurses, totalDays) {
+  const sh = getOrCreateSheet(ss, SHEET.FIXED);
+
+  const existingNames = [];
+  if (sh.getLastRow() > 1) {
+    const data = sh.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      const name = normalize(data[i][0]);
+      if (name) existingNames.push(name);
+    }
+  }
+
+  sh.clearContents();
+
+  const header = ['이름'];
+  for (let d = 1; d <= totalDays; d++) header.push(d);
+  sh.appendRow(header);
+  styleHeader(sh.getRange(1, 1, 1, header.length), '#6A5ACD');
+  sh.setFrozenRows(1);
+  sh.setFrozenColumns(1);
+
+  const namesToFill = existingNames.length > 0
+    ? existingNames
+    : nurses.map(n => n.name);
+
+  namesToFill.forEach(name => sh.appendRow([name]));
+
+  sh.setColumnWidth(1, 100);
+  for (let d = 2; d <= totalDays + 1; d++) sh.setColumnWidth(d, 36);
+}
+
+function menuGenerateBestOf() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  let yyyymm;
+  try { yyyymm = getTargetYYYYMM(ss); } catch(e) { ui.alert(e.message); return; }
+
+  const year  = parseInt(yyyymm.slice(0, 4), 10);
+  const month = parseInt(yyyymm.slice(4, 6), 10);
+
+  try {
+    ui.alert(`⏳ ${year}년 ${month}월 최적 근무표를 생성 중입니다...`);
+
+    const result = runBestOf(ss, yyyymm);
+    const { sched, nurses, holidays, prevHist, totalDays, finalViols, wantedMet, cleanCount, wanted } = result;
+
+    const outSheet = writeOutput(ss, yyyymm, sched, nurses, holidays, year, month, totalDays, wanted);
+    highlightViolations(outSheet, nurses, sched, totalDays, prevHist, year, month, holidays);
+
+    const totalWanted = wanted.length;
+    const unmetTotal  = wanted.filter(req => {
+      const raw = sched[req.nurse.idx][req.day - 1] || '';
+      return raw !== req.wtype && !(req.fallbackWtype && raw === req.fallbackWtype);
+    }).length;
+
+    const violMsg  = finalViols === 0 ? '✅ 위반 0건!' : `⚠️ 남은 위반: ${finalViols}건 (빨간 셀 확인)`;
+    const cleanMsg = cleanCount > 0
+      ? `🎯 위반 0건 후보 ${cleanCount}개 → 점수 기준 최적 선택`
+      : `⚠️ 위반 0건 달성 실패 → 위반 최소 후보 중 점수 기준 선택`;
+
+    ui.alert(`✅ ${year}년 ${month}월 근무표 생성 완료!`);
+
+  } catch(e) {
+    ui.alert('❌ 오류 발생:\n\n' + e.toString());
+    Logger.log(e.stack);
+  }
+}
+
+function menuPublish() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  let yyyymm;
+  try { yyyymm = getTargetYYYYMM(ss); } catch(e) { ui.alert(e.message); return; }
+
+  const outSheetName = SHEET.OUTPUT_PREFIX + yyyymm;
+  const outSheet     = ss.getSheetByName(outSheetName);
+  if (!outSheet) {
+    ui.alert(`❌ '${outSheetName}' 시트가 없습니다.\n먼저 [▶ 근무표 생성]을 실행해 주세요.`);
+    return;
+  }
+
+  const year      = parseInt(yyyymm.slice(0, 4), 10);
+  const month     = parseInt(yyyymm.slice(4, 6), 10);
+  const totalDays = getTotalDays(yyyymm);
+
+  try {
+    const nurses   = loadNurses(ss);
+    const holidays = loadHolidays(ss, year, month);
+    const prevHist = loadPrevHistory(ss, yyyymm, nurses);
+    loadPrevAccumData(ss, yyyymm, nurses);
+
+    const sched = readScheduleFromSheet(outSheet, nurses, totalDays);
+
+    const viols = countViolations(sched, nurses, prevHist, totalDays);
+
+    {
+      const totalRowsHL = outSheet.getLastRow();
+      if (totalRowsHL > 1) {
+        outSheet.getRange(2, 4, totalRowsHL - 1, totalDays)
+          .setBackground(null).setFontColor('#000000').setFontWeight('normal');
+      }
+    }
+    highlightViolations(outSheet, nurses, sched, totalDays, prevHist, year, month, holidays);
+
+    if (viols > 0) {
+      const forcePublish = ui.alert(
+        `⚠️ 법적 위반 ${viols}건`,
+        `빨간 셀에 법적 위반 ${viols}건이 있습니다.\n\n` +
+        `위반 상태로 그냥 발행하시겠습니까?\n` +
+        `(예: 위반 무시하고 발행 / 아니오: 취소하고 수정)`,
+        ui.ButtonSet.YES_NO
+      );
+      if (forcePublish !== ui.Button.YES) return;  // YES = 그냥 발행, NO/닫기 = 취소
+    } else {
+      const confirm = ui.alert(
+        '✅ 위반 없음 — 발행 확인',
+        `${year}년 ${month}월 근무표를 발행합니다. 계속하시겠습니까?`,
+        ui.ButtonSet.YES_NO
+      );
+      if (confirm !== ui.Button.YES) return;
+    }
+
+    const resultName = createResultSheet(ss, yyyymm, outSheet, nurses, totalDays);
+
+    ui.alert(
+      `✅ 발행 완료!\n\n` +
+      `📋 ${resultName} 시트 생성 완료\n` +
+      `   (출력표와 동일한 포맷 — 집계 포함)\n` +
+      `📊 누적 오프·나이트 수: 결과표_${yyyymm} C열에 기록됨\n` +
+      `   → 다음 달 전달근무표에 붙여넣으면 자동 반영`
+    );
+
+  } catch(e) {
+    ui.alert('❌ 오류 발생:\n\n' + e.toString());
+    Logger.log(e.stack);
+  }
+}
